@@ -12,13 +12,13 @@ A JavaScript/TypeScript port of the Vector Bot SDK that mirrors the structure of
 ## Getting Started
 
 ```bash
-npm install @vector/vector-sdk
+npm install @nekosuneprojects/vector-sdk
 ```
 
 Then import the pieces you need:
 
 ```ts
-import { VectorBotClient } from '@vector/vector-sdk';
+import { VectorBotClient } from '@nekosuneprojects/vector-sdk';
 
 const client = new VectorBotClient({
   privateKey: process.env.NOSTR_PRIVATE_KEY,
