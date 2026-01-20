@@ -1,24 +1,4 @@
-﻿# Vector Bot SDK (Node.js)
-
-A JavaScript/TypeScript port of the Vector Bot SDK that mirrors the structure of the original Rust crate while staying idiomatic for the Node.js ecosystem. It provides helpers for creating Vector bots, sending encrypted private messages and files, building metadata, subscribing to gift-wrap events, and uploading data through a NIP-96 server.
-
-## Highlights
-
-- `VectorBot` and `Channel` classes that wrap a Nostr client for message, reaction, typing, and file flows.
-- Metadata builders, filters, and utilities ported from the Rust implementation.
-- AES-256-GCM file encryption helpers and attachment helpers with extension inference.
-- Upload helpers that target the trusted NIP-96 server used by Vector and emit progress callbacks.
-
-## Getting Started
-
-```bash
-npm install @vector/vector-sdk
-```
-
-Then import the pieces you need:
-
-```ts
-import { VectorBotClient } from '@vector/vector-sdk';
+import { VectorBotClient } from '../../dist/index.js';
 
 const client = new VectorBotClient({
   privateKey: process.env.NOSTR_PRIVATE_KEY,
@@ -66,6 +46,17 @@ client.on('message', async (channel, tags, message, self) => {
     return;
   }
 
+  if (message.startsWith('!hello')) {
+    await client.sendMessage(channel, 'Hello! Would you like a cuppa coffee?');
+    return;
+  }
+
+  if (message.startsWith('!echo')) {
+    const content = message.replace('!echo', '').trim() || 'echo';
+    await client.sendMessage(channel, content);
+    return;
+  }
+
   if (message.startsWith('!upload')) {
     if (!process.env.UPLOAD_FILE_PATH) {
       await client.sendMessage(channel, 'Set UPLOAD_FILE_PATH to send a file.');
@@ -84,8 +75,3 @@ process.on('SIGINT', () => {
   client.close();
   process.exit(0);
 });
-```
-
-## Building
-
-The package is authored in TypeScript. Run `npm run build` to emit the `dist/` artifacts used by consumers.
