@@ -42,6 +42,27 @@ bot.connect().then(() => {
     const message = `This is an automated message at ${new Date()}`;
     channel.send(message);
   }, 60000); // Every minute
+
+  // Handle file upload
+  const attachmentFile = new AttachmentFile('path/to/file.txt', 'text/plain');
+  channel.upload(attachmentFile).then((fileId) => {
+    console.log('Uploaded file with ID:', fileId);
+  }).catch(err => {
+    console.error('Failed to upload file:', err);
+  });
+
+  // Build and send metadata
+  const metadata = createMetadata({
+    name: 'Example Bot',
+    description: 'A bot demonstrating all features of the Vector Bot SDK',
+    tags: ['bot', 'vector', 'nostr'],
+  });
+  channel.send(metadata).then(() => {
+    console.log('Sent metadata successfully');
+  }).catch(err => {
+    console.error('Failed to send metadata:', err);
+  });
+
 }).catch(err => {
   console.error('Failed to connect to Nostr:', err);
 });
