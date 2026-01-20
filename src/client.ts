@@ -1,5 +1,7 @@
-﻿import { finishEvent, getPublicKey, SimplePool, Event } from 'nostr-tools';
-import type { Metadata } from './metadata';
+import { SimplePool, Event } from 'nostr-tools';
+import { finalizeEvent, getPublicKey } from 'nostr-tools/pure';
+import type { Metadata } from './metadata.js';
+import { normalizePrivateKey } from './keys.js';
 
 export interface ClientConfig {
   proxy?: string;
@@ -18,38 +20,41 @@ export class VectorClient {
   public readonly relays: string[];
   public readonly publicKey: string;
   public readonly privateKey: string;
+  public readonly privateKeyBytes: Uint8Array;
 
   constructor(keys: string, config?: ClientConfig) {
-    this.privateKey = keys;
-    this.publicKey = getPublicKey(keys);
+    const normalized = normalizePrivateKey(keys);
+    this.privateKey = normalized.hex;
+    this.privateKeyBytes = normalized.bytes;
+    this.publicKey = getPublicKey(this.privateKeyBytes);
     this.relays = config?.defaultRelays ?? DEFAULT_RELAYS;
   }
 
   public async setMetadata(metadata: Metadata): Promise<void> {
-    const event: Event = finishEvent(
+    const event: Event = finalizeEvent(
       {
         kind: 0,
         created_at: Math.floor(Date.now() / 1000),
         tags: [],
         content: JSON.stringify(metadata),
-        pubkey: this.publicKey,
       },
-      this.privateKey,
+      this.privateKeyBytes,
     );
 
-    await this.publish(event);
+    await this.publish(event, this.relays);
   }
 
   public async publishEvent(event: Event, relays?: string[]): Promise<void> {
     return this.publish(event, relays ?? this.relays);
   }
 
-  private publish(event: Event, relays: string[]): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const pub = this.pool.publish(relays, event);
-      pub.on('ok', () => resolve());
-      pub.on('failed', (_relay, reason) => reject(new Error(reason ?? 'Publish failed')));
-    });
+  private async publish(event: Event, relays: string[]): Promise<void> {
+    const results = await Promise.allSettled(this.pool.publish(relays, event));
+    const rejected = results.find((result) => result.status === 'rejected');
+    if (rejected && rejected.status === 'rejected') {
+      const reason = rejected.reason instanceof Error ? rejected.reason : new Error(String(rejected.reason));
+      throw reason;
+    }
   }
 }
 

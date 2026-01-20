@@ -1,4 +1,5 @@
-﻿import { Kind, Filter } from 'nostr-tools';
+import { Filter } from 'nostr-tools';
+import { GiftWrap } from 'nostr-tools/kinds';
 
 export class SubscriptionError extends Error {}
 
@@ -10,7 +11,7 @@ export interface SubscriptionConfig {
 
 export const DEFAULT_SUBSCRIPTION_CONFIG: SubscriptionConfig = {
   pubkey: '',
-  kind: Kind.GiftWrap,
+  kind: GiftWrap,
   limit: 0,
 };
 
@@ -19,7 +20,7 @@ export function createGiftWrapSubscription(
   kind?: number,
   limit?: number,
 ): Filter {
-  const resolvedKind = kind ?? Kind.GiftWrap;
+  const resolvedKind = kind ?? GiftWrap;
   const resolvedLimit = limit ?? 0;
 
   if (resolvedLimit > 1000) {
@@ -28,7 +29,7 @@ export function createGiftWrapSubscription(
 
   return {
     kinds: [resolvedKind],
-    authors: [pubkey],
+    '#p': [pubkey],
     limit: resolvedLimit,
   } as Filter;
 }

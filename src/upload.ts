@@ -1,9 +1,10 @@
-﻿import fetch from 'node-fetch';
+import fetch from 'node-fetch';
 import FormData from 'form-data';
 import { sha256 } from '@noble/hashes/sha256';
 import * as secp from '@noble/secp256k1';
 import { bytesToHex } from '@noble/hashes/utils';
-import { getPublicKey } from 'nostr-tools';
+import { getPublicKey } from 'nostr-tools/pure';
+import { normalizePrivateKey } from './keys.js';
 
 const TRUSTED_PRIVATE_NIP96 = 'https://medea-1-swiss.vectorapp.io';
 
@@ -58,11 +59,12 @@ async function buildNip98Authorization(
   url: string,
   payload: Buffer,
 ): Promise<string> {
+  const normalized = normalizePrivateKey(privateKey);
   const dataHash = bytesToHex(sha256(payload));
   const message = `${method.toUpperCase()}\n${url}\n${dataHash}`;
   const messageHash = bytesToHex(sha256(Buffer.from(message, 'utf8')));
-  const signature = await secp.sign(messageHash, privateKey);
-  const publicKey = getPublicKey(privateKey);
+  const signature = bytesToHex(await secp.sign(messageHash, normalized.hex));
+  const publicKey = getPublicKey(normalized.bytes);
   return `NIP98 ${publicKey}:${signature}`;
 }
 

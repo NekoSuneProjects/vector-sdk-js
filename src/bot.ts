@@ -1,12 +1,16 @@
 ﻿import { promises as fs } from 'fs';
 import mime from 'mime-types';
-import { fromBuffer } from 'file-type';
-import { finishEvent, Kind, nip04 } from 'nostr-tools';
+import { fileTypeFromBuffer } from 'file-type';
+import { finalizeEvent } from 'nostr-tools/pure';
+import * as kinds from 'nostr-tools/kinds';
+import * as nip04 from 'nostr-tools/nip04';
+import * as nip59 from 'nostr-tools/nip59';
 
-import { buildClient, ClientConfig, VectorClient } from './client';
-import { createMetadata } from './metadata';
-import { calculateFileHash, encryptData, generateEncryptionParams } from './crypto';
-import { getServerConfig, ProgressCallback, uploadDataWithProgress } from './upload';
+import { buildClient, ClientConfig, VectorClient } from './client.js';
+import { createMetadata } from './metadata.js';
+import { calculateFileHash, encryptData, generateEncryptionParams } from './crypto.js';
+import { getServerConfig, ProgressCallback, uploadDataWithProgress } from './upload.js';
+import { normalizePublicKey } from './keys.js';
 
 export interface ImageMetadata {
   blurhash: string;
@@ -37,12 +41,12 @@ export async function loadFile(path: string): Promise<AttachmentFile> {
 }
 
 async function inferExtensionFromBytes(bytes: Buffer): Promise<string> {
-  const fileType = await fromBuffer(bytes);
+  const fileType = await fileTypeFromBuffer(bytes);
   return fileType?.ext ?? 'bin';
 }
 
 export function createProgressCallback(): ProgressCallback {
-  return (percentage) => {
+  return (percentage: number | null) => {
     if (percentage !== null) {
       console.log(`Upload progress: ${percentage}%`);
     }
@@ -61,6 +65,7 @@ function sanitizeUrl(candidate: string, fallback: string): string {
 export class VectorBot {
   public readonly publicKey: string;
   public readonly privateKey: string;
+  public readonly privateKeyBytes: Uint8Array;
   public readonly client: VectorClient;
 
   private constructor(
@@ -75,6 +80,7 @@ export class VectorBot {
     client: VectorClient,
   ) {
     this.privateKey = privateKey;
+    this.privateKeyBytes = client.privateKeyBytes;
     this.publicKey = client.publicKey;
     this.client = client;
   }
@@ -124,7 +130,7 @@ export class VectorBot {
     }
 
     return new VectorBot(
-      privateKey,
+      client.privateKey,
       name,
       displayName,
       about,
@@ -142,38 +148,63 @@ export class VectorBot {
 }
 
 export class Channel {
-  constructor(public recipient: string, public baseBot: VectorBot) {}
+  public readonly recipient: string;
+  public readonly baseBot: VectorBot;
+
+  constructor(recipient: string, baseBot: VectorBot) {
+    this.recipient = normalizePublicKey(recipient);
+    this.baseBot = baseBot;
+  }
 
   public async sendPrivateMessage(message: string): Promise<boolean> {
+    const createdAt = Math.floor(Date.now() / 1000);
+    const tags = [
+      ['p', this.recipient],
+      ['ms', (Date.now() % 1000).toString()],
+    ];
+
+    let sent = false;
+
     try {
       const payload = await nip04.encrypt(this.baseBot.privateKey, this.recipient, message);
-      const event = finishEvent(
+      const event = finalizeEvent(
         {
-          kind: Kind.EncryptedDirectMessage,
-          created_at: Math.floor(Date.now() / 1000),
-          tags: [
-            ['p', this.recipient],
-            ['ms', (Date.now() % 1000).toString()],
-          ],
+          kind: kinds.EncryptedDirectMessage,
+          created_at: createdAt,
+          tags,
           content: payload,
-          pubkey: this.baseBot.publicKey,
         },
-        this.baseBot.privateKey,
+        this.baseBot.privateKeyBytes,
       );
 
       await this.baseBot.client.publishEvent(event);
-      return true;
+      sent = true;
     } catch (error) {
-      console.error('Failed to send private message', error);
-      return false;
+      console.error('Failed to send NIP-04 private message', error);
     }
+
+    try {
+      const rumor = {
+        kind: kinds.PrivateDirectMessage,
+        created_at: createdAt,
+        tags,
+        content: message,
+      };
+      const wrapped = nip59.wrapEvent(rumor, this.baseBot.privateKeyBytes, this.recipient);
+      await this.baseBot.client.publishEvent(wrapped);
+      sent = true;
+    } catch (error) {
+      console.error('Failed to send NIP-59 gift-wrap', error);
+    }
+
+    return sent;
   }
 
   public async sendReaction(referenceId: string, emoji: string): Promise<boolean> {
     try {
-      const event = finishEvent(
+      const event = finalizeEvent(
         {
-          kind: Kind.Reaction,
+          kind: kinds.Reaction,
           created_at: Math.floor(Date.now() / 1000),
           tags: [
             ['e', referenceId],
@@ -181,9 +212,8 @@ export class Channel {
             ['ms', (Date.now() % 1000).toString()],
           ],
           content: emoji,
-          pubkey: this.baseBot.publicKey,
         },
-        this.baseBot.privateKey,
+        this.baseBot.privateKeyBytes,
       );
 
       await this.baseBot.client.publishEvent(event);
@@ -197,9 +227,9 @@ export class Channel {
   public async sendTypingIndicator(): Promise<boolean> {
     try {
       const now = Math.floor(Date.now() / 1000);
-      const event = finishEvent(
+      const event = finalizeEvent(
         {
-          kind: 30078,
+          kind: kinds.Application,
           created_at: now,
           tags: [
             ['p', this.recipient],
@@ -207,9 +237,8 @@ export class Channel {
             ['expiration', (now + 3600).toString()],
           ],
           content: 'typing',
-          pubkey: this.baseBot.publicKey,
         },
-        this.baseBot.privateKey,
+        this.baseBot.privateKeyBytes,
       );
 
       await this.baseBot.client.publishEvent(event);
@@ -259,15 +288,14 @@ export class Channel {
         tags.push(['dim', `${file.imgMeta.width}x${file.imgMeta.height}`]);
       }
 
-      const event = finishEvent(
+      const event = finalizeEvent(
         {
-          kind: 15,
+          kind: kinds.FileMessage,
           created_at: Math.floor(Date.now() / 1000),
           tags,
           content: url,
-          pubkey: this.baseBot.publicKey,
         },
-        this.baseBot.privateKey,
+        this.baseBot.privateKeyBytes,
       );
 
       await this.baseBot.client.publishEvent(event);
