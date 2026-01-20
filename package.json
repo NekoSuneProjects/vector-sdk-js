@@ -1,6 +1,6 @@
 {
-  "name": "@vector/vector-sdk",
-  "version": "0.2.1",
+  "name": "@nekosuneprojects/vector-sdk",
+  "version": "1.0.0",
   "description": "Node.js reimplementation of the Vector Bot SDK",
   "type": "module",
   "main": "dist/index.js",
@@ -11,6 +11,13 @@
   "scripts": {
     "build": "tsc",
     "test": "npm run build"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/NekoSuneProjects/vector-sdk-js.git"
+  },
+  "bugs": {
+    "url": "https://github.com/NekoSuneProjects/vector-sdk-js/issues"
   },
   "keywords": [
     "nostr",

@@ -1,0 +1,78 @@
+name: Node.js Package NPMJS
+
+on:
+  release:
+    types: 
+      - published
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  packages: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      # Checkout project repository
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Setup Node.js environment
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org/'
+
+      # Configure Git
+      - name: Configure Git
+        run: |
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "GitHub Actions"
+
+      # Read current package version
+      - name: Read version from package.json
+        id: read_version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+      # Update changelog unreleased section with current version
+      - name: Update changelog
+        uses: superfaceai/release-changelog-action@v1
+        with:
+          path-to-changelog: CHANGELOG.md
+          version: ${{ env.VERSION }}
+          operation: release
+
+      # Commit and tag
+      - name: Commit
+        run: |
+          git add package.json CHANGELOG.md
+          git commit -m "chore: release ${{ env.VERSION }}"
+
+      # Publish version to npm
+      - name: Publish to npm
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.npm_token }}
+
+      # Read version changelog
+      - id: get_changelog
+        name: Get version changelog
+        uses: superfaceai/release-changelog-action@v1
+        with:
+          path-to-changelog: CHANGELOG.md
+          version: ${{ env.VERSION }}
+          operation: read
+
+      # Update GitHub release
+      - name: Create or update GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ env.VERSION }}
+          body: ${{ steps.get_changelog.outputs.changelog }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
