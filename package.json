@@ -1,6 +1,6 @@
 {
   "name": "@nekosuneprojects/vector-sdk",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Node.js reimplementation of the Vector Bot SDK",
   "type": "module",
   "main": "dist/index.js",
