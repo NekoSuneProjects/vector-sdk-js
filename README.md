@@ -19,6 +19,32 @@ Then import the pieces you need:
 
 ```ts
 import { VectorBot, AttachmentFile, createMetadata } from '@vector/vector-sdk';
+
+// Initialize the bot with your Nostr private key
+const privateKey = 'your_private_key_here';
+const bot = new VectorBot(privateKey);
+
+// Connect to Nostr
+bot.connect().then(() => {
+  console.log('Connected to Nostr!');
+
+  // Subscribe to events in a specific channel
+  const channel = bot.channel('example_channel');
+
+  channel.on('event', (event) => {
+    console.log('Received event:', event);
+    // Respond to the received event
+    channel.reply(event.id, 'Hello! This is a bot response.');
+  });
+
+  // Send a message to all subscribers
+  setInterval(() => {
+    const message = `This is an automated message at ${new Date()}`;
+    channel.send(message);
+  }, 60000); // Every minute
+}).catch(err => {
+  console.error('Failed to connect to Nostr:', err);
+});
 ```
 
 ## Building
