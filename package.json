@@ -1,6 +1,6 @@
 {
   "name": "@nekosuneprojects/vector-sdk",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Node.js reimplementation of the Vector Bot SDK",
   "type": "module",
   "main": "dist/index.js",
@@ -10,6 +10,7 @@
   ],
   "scripts": {
     "build": "tsc",
+    "prepack": "npm run build",
     "test": "npm run build"
   },
   "repository": {
