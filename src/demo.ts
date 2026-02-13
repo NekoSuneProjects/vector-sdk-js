@@ -245,7 +245,7 @@ export class VectorBotClient extends EventEmitter {
     const profile = await this.getProfile(bot, pubkey);
     this.emit(
       'message',
-      profile?.displayName || profile?.name || pubkey,
+      pubkey,
       {
         pubkey,
         kind,

@@ -3,39 +3,51 @@ import { bytesToHex, hexToBytes } from 'nostr-tools/utils';
 
 export class KeyFormatError extends Error {}
 
-export function normalizePrivateKey(privateKey: string): { hex: string; bytes: Uint8Array } {
-  const trimmed = privateKey.trim();
+function stripNostrUriPrefix(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.toLowerCase().startsWith('nostr:')) {
+    return trimmed.slice('nostr:'.length).trim();
+  }
+  return trimmed;
+}
 
-  if (trimmed.startsWith('nsec1')) {
-    const decoded = nip19.decode(trimmed);
+export function normalizePrivateKey(privateKey: string): { hex: string; bytes: Uint8Array } {
+  const trimmed = stripNostrUriPrefix(privateKey);
+  const lowered = trimmed.toLowerCase();
+
+  if (lowered.startsWith('nsec1')) {
+    const decoded = nip19.decode(lowered);
     if (decoded.type !== 'nsec') {
       throw new KeyFormatError('Invalid nsec private key');
     }
     return { hex: bytesToHex(decoded.data), bytes: decoded.data };
   }
 
-  if (!/^[0-9a-fA-F]{64}$/.test(trimmed)) {
+  const hexCandidate = lowered.startsWith('0x') ? lowered.slice(2) : lowered;
+  if (!/^[0-9a-f]{64}$/.test(hexCandidate)) {
     throw new KeyFormatError('Private key must be a 32-byte hex string or nsec');
   }
 
-  const hex = trimmed.toLowerCase();
+  const hex = hexCandidate;
   return { hex, bytes: hexToBytes(hex) };
 }
 
 export function normalizePublicKey(publicKey: string): string {
-  const trimmed = publicKey.trim();
+  const trimmed = stripNostrUriPrefix(publicKey);
+  const lowered = trimmed.toLowerCase();
 
-  if (trimmed.startsWith('npub1')) {
-    const decoded = nip19.decode(trimmed);
+  if (lowered.startsWith('npub1')) {
+    const decoded = nip19.decode(lowered);
     if (decoded.type !== 'npub') {
       throw new KeyFormatError('Invalid npub public key');
     }
     return decoded.data;
   }
 
-  if (!/^[0-9a-fA-F]{64}$/.test(trimmed)) {
+  const hexCandidate = lowered.startsWith('0x') ? lowered.slice(2) : lowered;
+  if (!/^[0-9a-f]{64}$/.test(hexCandidate)) {
     throw new KeyFormatError('Public key must be a 32-byte hex string or npub');
   }
 
-  return trimmed.toLowerCase();
+  return hexCandidate;
 }

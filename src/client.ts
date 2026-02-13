@@ -1,5 +1,6 @@
 import { SimplePool, Event } from 'nostr-tools';
 import { finalizeEvent, getPublicKey } from 'nostr-tools/pure';
+import WebSocket from 'ws';
 import type { Metadata } from './metadata.js';
 import { normalizePrivateKey } from './keys.js';
 
@@ -15,6 +16,12 @@ const DEFAULT_RELAYS = [
   'wss://nostr.computingcache.com',
 ];
 
+function ensureWebSocket(): void {
+  if (typeof globalThis.WebSocket === 'undefined') {
+    globalThis.WebSocket = WebSocket as unknown as typeof globalThis.WebSocket;
+  }
+}
+
 export class VectorClient {
   public readonly pool = new SimplePool();
   public readonly relays: string[];
@@ -23,6 +30,7 @@ export class VectorClient {
   public readonly privateKeyBytes: Uint8Array;
 
   constructor(keys: string, config?: ClientConfig) {
+    ensureWebSocket();
     const normalized = normalizePrivateKey(keys);
     this.privateKey = normalized.hex;
     this.privateKeyBytes = normalized.bytes;

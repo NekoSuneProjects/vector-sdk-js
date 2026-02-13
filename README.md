@@ -56,22 +56,23 @@ client.on('error', (error) => {
   console.error('Bot error:', error);
 });
 
-client.on('message', async (channel, tags, message, self) => {
+client.on('message', async (senderPubkey, tags, message, self) => {
   if (self) return;
 
-  console.log(`${channel}: ${message}`);
+  const senderName = tags.displayName || senderPubkey;
+  console.log(`${senderName}: ${message}`);
 
   if (message.startsWith('!ping')) {
-    await client.sendMessage(channel, 'pong');
+    await client.sendMessage(senderPubkey, 'pong');
     return;
   }
 
   if (message.startsWith('!upload')) {
     if (!process.env.UPLOAD_FILE_PATH) {
-      await client.sendMessage(channel, 'Set UPLOAD_FILE_PATH to send a file.');
+      await client.sendMessage(senderPubkey, 'Set UPLOAD_FILE_PATH to send a file.');
       return;
     }
-    await client.sendFile(channel, process.env.UPLOAD_FILE_PATH);
+    await client.sendFile(senderPubkey, process.env.UPLOAD_FILE_PATH);
   }
 });
 

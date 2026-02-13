@@ -202,21 +202,19 @@ export class Channel {
 
   public async sendReaction(referenceId: string, emoji: string): Promise<boolean> {
     try {
-      const event = finalizeEvent(
-        {
-          kind: kinds.Reaction,
-          created_at: Math.floor(Date.now() / 1000),
-          tags: [
-            ['e', referenceId],
-            ['p', this.recipient],
-            ['ms', (Date.now() % 1000).toString()],
-          ],
-          content: emoji,
-        },
-        this.baseBot.privateKeyBytes,
-      );
-
-      await this.baseBot.client.publishEvent(event);
+      const rumor = {
+        kind: kinds.Reaction,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [
+          ['e', referenceId],
+          ['p', this.recipient],
+          ['k', kinds.PrivateDirectMessage.toString()],
+          ['ms', (Date.now() % 1000).toString()],
+        ],
+        content: emoji,
+      };
+      const wrapped = nip59.wrapEvent(rumor, this.baseBot.privateKeyBytes, this.recipient);
+      await this.baseBot.client.publishEvent(wrapped);
       return true;
     } catch (error) {
       console.error('Failed to send reaction', error);
@@ -227,21 +225,19 @@ export class Channel {
   public async sendTypingIndicator(): Promise<boolean> {
     try {
       const now = Math.floor(Date.now() / 1000);
-      const event = finalizeEvent(
-        {
-          kind: kinds.Application,
-          created_at: now,
-          tags: [
-            ['p', this.recipient],
-            ['ms', (Date.now() % 1000).toString()],
-            ['expiration', (now + 3600).toString()],
-          ],
-          content: 'typing',
-        },
-        this.baseBot.privateKeyBytes,
-      );
-
-      await this.baseBot.client.publishEvent(event);
+      const rumor = {
+        kind: kinds.Application,
+        created_at: now,
+        tags: [
+          ['p', this.recipient],
+          ['d', 'vector'],
+          ['ms', (Date.now() % 1000).toString()],
+          ['expiration', (now + 30).toString()],
+        ],
+        content: 'typing',
+      };
+      const wrapped = nip59.wrapEvent(rumor, this.baseBot.privateKeyBytes, this.recipient);
+      await this.baseBot.client.publishEvent(wrapped);
       return true;
     } catch (error) {
       console.error('Failed to send typing indicator', error);
