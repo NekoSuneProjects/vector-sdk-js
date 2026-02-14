@@ -11,6 +11,7 @@ const client = new VectorBotClient({
     .split(',')
     .map((groupId) => groupId.trim())
     .filter(Boolean),
+  vectorOnly: true,
   autoDiscoverGroups: true,
   discoverGroupsFromHistory: true,
   historySinceHours: Number(process.env.NOSTR_GROUP_HISTORY_HOURS ?? 24 * 14),
@@ -50,12 +51,18 @@ client.on('group_discovered', ({ groupId, eventId, sender }) => {
   console.log(`Known groups: ${client.getKnownGroupIds().join(', ')}`);
 });
 
+client.on('group_wrapper', ({ groupId }) => {
+  console.log(`Vector MLS wrapper seen for group ${groupId}.`);
+});
+
 client.on('group_bootstrap_complete', ({ discovered, knownGroupIds }) => {
   console.log(`Group history bootstrap done. discovered=${discovered} total=${knownGroupIds.length}`);
 });
 
 client.on('message', async (senderPubkey, tags, message, self) => {
   if (self) return;
+  if (tags.isGroup && !tags.botInGroup) return;
+  if (tags.isGroup && !tags.directedToBot) return;
 
   const senderName = tags.displayName || senderPubkey;
   const target = tags.isGroup ? `group:${tags.groupId}` : senderPubkey;

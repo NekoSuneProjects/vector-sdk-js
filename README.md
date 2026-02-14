@@ -6,9 +6,11 @@ A JavaScript/TypeScript port of the Vector Bot SDK that mirrors the structure of
 
 - `VectorBot` and `Channel` classes that wrap a Nostr client for message, reaction, typing, and file flows.
 - Partial relay failures no longer fail sends when at least one relay accepts the event.
-- Group chat support for NIP-29 style `kind:9` messages via `groupIds` + `sendGroupMessage`.
-- Optional `autoDiscoverGroups` mode that learns group IDs from incoming `kind:9` events.
+- Group discovery support via `groupIds` + `autoDiscoverGroups`.
+- Optional `vectorOnly` mode matching VectorApp relay filters (`kind:1059` + `kind:444`).
 - Optional history bootstrap (`discoverGroupsFromHistory`) to discover already-active groups at startup.
+- Group command safety: `tags.directedToBot` lets you ignore commands not addressed to the bot.
+- Group command routing: plain `!command` in groups is accepted only when `tags.botInGroup` is true.
 - Metadata builders, filters, and utilities ported from the Rust implementation.
 - AES-256-GCM file encryption helpers and attachment helpers with extension inference.
 - Upload helpers that target the trusted NIP-96 server used by Vector and emit progress callbacks.
@@ -35,6 +37,7 @@ const client = new VectorBotClient({
     .split(',')
     .map((groupId) => groupId.trim())
     .filter(Boolean),
+  vectorOnly: true,
   autoDiscoverGroups: true,
   discoverGroupsFromHistory: true,
   historySinceHours: Number(process.env.NOSTR_GROUP_HISTORY_HOURS ?? 24 * 14),
@@ -78,8 +81,14 @@ client.on('group_bootstrap_complete', ({ discovered, knownGroupIds }) => {
   console.log(`Group history bootstrap done. discovered=${discovered} total=${knownGroupIds.length}`);
 });
 
+client.on('group_wrapper', ({ groupId }) => {
+  console.log(`Vector MLS wrapper seen for group ${groupId}`);
+});
+
 client.on('message', async (senderPubkey, tags, message, self) => {
   if (self) return;
+  if (tags.isGroup && !tags.botInGroup) return;
+  if (tags.isGroup && !tags.directedToBot) return;
 
   const reply = async (content: string) => {
     if (tags.isGroup && tags.groupId) {
@@ -113,6 +122,8 @@ process.on('SIGINT', () => {
   process.exit(0);
 });
 ```
+
+Note: Vector private groups are MLS-encrypted wrappers (`kind:444`). This SDK can discover those groups from `h` tags, but cannot read plaintext commands from those wrappers yet.
 
 ## Building
 

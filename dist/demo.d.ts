@@ -13,6 +13,7 @@ export type BotClientOptions = {
     privateKey: string;
     relays: string[];
     groupIds?: string[];
+    vectorOnly?: boolean;
     autoDiscoverGroups?: boolean;
     discoverGroupsFromHistory?: boolean;
     historySinceHours?: number;
@@ -27,6 +28,8 @@ export type MessageTags = {
     conversationId: string;
     groupId?: string;
     isGroup?: boolean;
+    botInGroup?: boolean;
+    directedToBot?: boolean;
     kind: number;
     rawEvent: Event;
     wrapped?: boolean;
@@ -41,6 +44,8 @@ export declare class VectorBotClient extends EventEmitter {
     private readonly profileCache;
     private readonly connectionState;
     private readonly reconnectingRelays;
+    private readonly configuredGroupIds;
+    private readonly joinedGroupIds;
     private readonly knownGroupIds;
     private connectionMonitor?;
     constructor(options: BotClientOptions);
@@ -59,6 +64,8 @@ export declare class VectorBotClient extends EventEmitter {
     private handleGroupMessage;
     private emitMessage;
     private findFirstTagValue;
+    private isGroupMessageDirectedToBot;
+    private isBotInGroup;
     private getProfile;
     private log;
 }

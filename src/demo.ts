@@ -23,6 +23,7 @@ export type BotClientOptions = {
   privateKey: string;
   relays: string[];
   groupIds?: string[];
+  vectorOnly?: boolean;
   autoDiscoverGroups?: boolean;
   discoverGroupsFromHistory?: boolean;
   historySinceHours?: number;
@@ -38,6 +39,8 @@ export type MessageTags = {
   conversationId: string;
   groupId?: string;
   isGroup?: boolean;
+  botInGroup?: boolean;
+  directedToBot?: boolean;
   kind: number;
   rawEvent: Event;
   wrapped?: boolean;
@@ -53,6 +56,8 @@ export class VectorBotClient extends EventEmitter {
   private readonly profileCache = new Map<string, { name?: string; displayName?: string }>();
   private readonly connectionState = new Map<string, boolean>();
   private readonly reconnectingRelays = new Set<string>();
+  private readonly configuredGroupIds = new Set<string>();
+  private readonly joinedGroupIds = new Set<string>();
   private readonly knownGroupIds = new Set<string>();
   private connectionMonitor?: NodeJS.Timeout;
 
@@ -62,6 +67,8 @@ export class VectorBotClient extends EventEmitter {
     for (const groupId of options.groupIds ?? []) {
       const normalized = groupId.trim();
       if (normalized) {
+        this.configuredGroupIds.add(normalized);
+        this.joinedGroupIds.add(normalized);
         this.knownGroupIds.add(normalized);
       }
     }
@@ -164,6 +171,8 @@ export class VectorBotClient extends EventEmitter {
     );
 
     await this.bot.client.publishEvent(event);
+    this.joinedGroupIds.add(normalizedGroupId);
+    this.knownGroupIds.add(normalizedGroupId);
     this.log('Sent group message to', normalizedGroupId);
     return true;
   }
@@ -262,8 +271,10 @@ export class VectorBotClient extends EventEmitter {
       return;
     }
 
+    const vectorOnly = this.options.vectorOnly !== false;
+    const groupKind = vectorOnly ? VECTOR_MLS_GROUP_WRAPPER_KIND : ChatMessage;
     const groupFilter = {
-      kinds: [ChatMessage],
+      kinds: [groupKind],
       ...(autoDiscoverGroups ? {} : { '#h': groupIds }),
     };
 
@@ -284,12 +295,14 @@ export class VectorBotClient extends EventEmitter {
     const now = Math.floor(Date.now() / 1000);
     const sinceHours = Math.max(1, this.options.historySinceHours ?? 24 * 7);
     const limit = Math.max(10, this.options.historyMaxEvents ?? 500);
+    const vectorOnly = this.options.vectorOnly !== false;
+    const groupKind = vectorOnly ? VECTOR_MLS_GROUP_WRAPPER_KIND : ChatMessage;
 
     try {
       const events = await bot.client.pool.querySync(
         bot.client.relays,
         {
-          kinds: [ChatMessage],
+          kinds: [groupKind],
           since: now - sinceHours * 3600,
           limit,
         },
@@ -355,7 +368,9 @@ export class VectorBotClient extends EventEmitter {
   }
 
   private handleGroupMessage(bot: VectorBot, event: Event): void {
-    if (event.kind !== ChatMessage) {
+    const vectorOnly = this.options.vectorOnly !== false;
+    const expectedKind = vectorOnly ? VECTOR_MLS_GROUP_WRAPPER_KIND : ChatMessage;
+    if (event.kind !== expectedKind) {
       this.log('Unhandled group event:', event);
       return;
     }
@@ -372,10 +387,19 @@ export class VectorBotClient extends EventEmitter {
       this.emit('group_discovered', { groupId, eventId: event.id, sender: event.pubkey, source: 'live' });
     }
 
+    if (vectorOnly) {
+      this.emit('group_wrapper', { groupId, rawEvent: event });
+      return;
+    }
+
+    const botInGroup = this.isBotInGroup(bot, groupId, event);
+    const directedToBot = this.isGroupMessageDirectedToBot(bot, event, botInGroup);
     this.emitMessage(bot, event.pubkey, event.kind, event, event.content, false, {
       conversationId: groupId,
       groupId,
       isGroup: true,
+      botInGroup,
+      directedToBot,
     }).catch((error) => {
       this.log('Failed to emit group message:', error);
       this.emit('error', error);
@@ -389,7 +413,7 @@ export class VectorBotClient extends EventEmitter {
     rawEvent: Event,
     content: string,
     wrapped: boolean,
-    override?: { conversationId?: string; groupId?: string; isGroup?: boolean },
+    override?: { conversationId?: string; groupId?: string; isGroup?: boolean; botInGroup?: boolean; directedToBot?: boolean },
   ): Promise<void> {
     const profile = await this.getProfile(bot, pubkey);
     const conversationId = override?.conversationId ?? pubkey;
@@ -402,6 +426,8 @@ export class VectorBotClient extends EventEmitter {
         conversationId,
         groupId: override?.groupId,
         isGroup: override?.isGroup ?? false,
+        botInGroup: override?.isGroup ? override?.botInGroup ?? false : false,
+        directedToBot: override?.isGroup ? override?.directedToBot ?? false : true,
         kind,
         rawEvent,
         wrapped,
@@ -419,6 +445,52 @@ export class VectorBotClient extends EventEmitter {
       }
     }
     return undefined;
+  }
+
+  private isGroupMessageDirectedToBot(bot: VectorBot, event: Event, botInGroup: boolean): boolean {
+    // Direct mention via p-tag to bot pubkey
+    for (const tag of event.tags) {
+      if (tag[0] === 'p' && tag[1] === bot.publicKey) {
+        return true;
+      }
+    }
+
+    const content = (event.content ?? '').trim();
+    if (!content) {
+      return false;
+    }
+
+    const lower = content.toLowerCase();
+    const botName = (bot.name ?? '').toLowerCase();
+    const botDisplay = (bot.displayName ?? '').toLowerCase();
+
+    if (botName && (lower.startsWith(`@${botName}`) || lower.startsWith(`${botName}:`))) {
+      return true;
+    }
+    if (botDisplay && (lower.startsWith(`@${botDisplay}`) || lower.startsWith(`${botDisplay}:`))) {
+      return true;
+    }
+
+    // Allow plain command invocation in groups only when bot is already known in that group.
+    if (botInGroup && /^\!\S+/.test(content)) {
+      return true;
+    }
+
+    return false;
+  }
+
+  private isBotInGroup(bot: VectorBot, groupId: string, event: Event): boolean {
+    if (event.pubkey === bot.publicKey) {
+      this.joinedGroupIds.add(groupId);
+      return true;
+    }
+    if (this.joinedGroupIds.has(groupId)) {
+      return true;
+    }
+    if (this.configuredGroupIds.has(groupId)) {
+      return true;
+    }
+    return false;
   }
 
   private async getProfile(
@@ -459,3 +531,5 @@ export class VectorBotClient extends EventEmitter {
     console.log('[vector-bot]', ...args);
   }
 }
+
+const VECTOR_MLS_GROUP_WRAPPER_KIND = 444;
