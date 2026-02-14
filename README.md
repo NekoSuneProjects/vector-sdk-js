@@ -5,6 +5,10 @@ A JavaScript/TypeScript port of the Vector Bot SDK that mirrors the structure of
 ## Highlights
 
 - `VectorBot` and `Channel` classes that wrap a Nostr client for message, reaction, typing, and file flows.
+- Partial relay failures no longer fail sends when at least one relay accepts the event.
+- Group chat support for NIP-29 style `kind:9` messages via `groupIds` + `sendGroupMessage`.
+- Optional `autoDiscoverGroups` mode that learns group IDs from incoming `kind:9` events.
+- Optional history bootstrap (`discoverGroupsFromHistory`) to discover already-active groups at startup.
 - Metadata builders, filters, and utilities ported from the Rust implementation.
 - AES-256-GCM file encryption helpers and attachment helpers with extension inference.
 - Upload helpers that target the trusted NIP-96 server used by Vector and emit progress callbacks.
@@ -22,10 +26,19 @@ import { VectorBotClient } from '@nekosuneprojects/vector-sdk';
 
 const client = new VectorBotClient({
   privateKey: process.env.NOSTR_PRIVATE_KEY,
-  relays: (process.env.NOSTR_RELAYS ?? 'wss://jskitty.cat/nostr')
+  relays: (process.env.NOSTR_RELAYS
+    ?? 'wss://jskitty.cat/nostr,wss://asia.vectorapp.io/nostr,wss://nostr.computingcache.com,wss://relay.damus.io')
     .split(',')
     .map((relay) => relay.trim())
     .filter(Boolean),
+  groupIds: (process.env.NOSTR_GROUP_IDS ?? '')
+    .split(',')
+    .map((groupId) => groupId.trim())
+    .filter(Boolean),
+  autoDiscoverGroups: true,
+  discoverGroupsFromHistory: true,
+  historySinceHours: Number(process.env.NOSTR_GROUP_HISTORY_HOURS ?? 24 * 14),
+  historyMaxEvents: Number(process.env.NOSTR_GROUP_HISTORY_LIMIT ?? 1000),
   debug: process.env.DEBUG === '1',
   reconnect: true,
   reconnectIntervalMs: 15000,
@@ -56,14 +69,28 @@ client.on('error', (error) => {
   console.error('Bot error:', error);
 });
 
+client.on('group_discovered', ({ groupId }) => {
+  console.log(`Discovered group: ${groupId}`);
+  console.log(`Known groups: ${client.getKnownGroupIds().join(', ')}`);
+});
+
+client.on('group_bootstrap_complete', ({ discovered, knownGroupIds }) => {
+  console.log(`Group history bootstrap done. discovered=${discovered} total=${knownGroupIds.length}`);
+});
+
 client.on('message', async (senderPubkey, tags, message, self) => {
   if (self) return;
 
-  const senderName = tags.displayName || senderPubkey;
-  console.log(`${senderName}: ${message}`);
+  const reply = async (content: string) => {
+    if (tags.isGroup && tags.groupId) {
+      await client.sendGroupMessage(tags.groupId, content);
+      return;
+    }
+    await client.sendMessage(senderPubkey, content);
+  };
 
   if (message.startsWith('!ping')) {
-    await client.sendMessage(senderPubkey, 'pong');
+    await reply('pong');
     return;
   }
 

@@ -2,10 +2,19 @@ import { VectorBotClient } from '../../dist/index.js';
 
 const client = new VectorBotClient({
   privateKey: process.env.NOSTR_PRIVATE_KEY,
-  relays: (process.env.NOSTR_RELAYS ?? 'wss://jskitty.cat/nostr')
+  relays: (process.env.NOSTR_RELAYS
+    ?? 'wss://jskitty.cat/nostr,wss://asia.vectorapp.io/nostr,wss://nostr.computingcache.com,wss://relay.damus.io')
     .split(',')
     .map((relay) => relay.trim())
     .filter(Boolean),
+  groupIds: (process.env.NOSTR_GROUP_IDS ?? '')
+    .split(',')
+    .map((groupId) => groupId.trim())
+    .filter(Boolean),
+  autoDiscoverGroups: true,
+  discoverGroupsFromHistory: true,
+  historySinceHours: Number(process.env.NOSTR_GROUP_HISTORY_HOURS ?? 24 * 14),
+  historyMaxEvents: Number(process.env.NOSTR_GROUP_HISTORY_LIMIT ?? 1000),
   debug: process.env.DEBUG === '1',
   reconnect: true,
   reconnectIntervalMs: 15000,
@@ -36,31 +45,53 @@ client.on('error', (error) => {
   console.error('Bot error:', error);
 });
 
+client.on('group_discovered', ({ groupId, eventId, sender }) => {
+  console.log(`Discovered group ${groupId} from ${sender} via event ${eventId}`);
+  console.log(`Known groups: ${client.getKnownGroupIds().join(', ')}`);
+});
+
+client.on('group_bootstrap_complete', ({ discovered, knownGroupIds }) => {
+  console.log(`Group history bootstrap done. discovered=${discovered} total=${knownGroupIds.length}`);
+});
+
 client.on('message', async (senderPubkey, tags, message, self) => {
   if (self) return;
 
   const senderName = tags.displayName || senderPubkey;
-  console.log(`${senderName}: ${message}`);
+  const target = tags.isGroup ? `group:${tags.groupId}` : senderPubkey;
+  console.log(`${senderName} -> ${target}: ${message}`);
+
+  const reply = async (content) => {
+    if (tags.isGroup && tags.groupId) {
+      await client.sendGroupMessage(tags.groupId, content);
+      return;
+    }
+    await client.sendMessage(senderPubkey, content);
+  };
 
   if (message.startsWith('!ping')) {
-    await client.sendMessage(senderPubkey, 'pong');
+    await reply('pong');
     return;
   }
 
   if (message.startsWith('!hello')) {
-    await client.sendMessage(senderPubkey, 'Hello! Would you like a cuppa coffee?');
+    await reply('Hello! Would you like a cuppa coffee?');
     return;
   }
 
   if (message.startsWith('!echo')) {
     const content = message.replace('!echo', '').trim() || 'echo';
-    await client.sendMessage(senderPubkey, content);
+    await reply(content);
     return;
   }
 
   if (message.startsWith('!upload')) {
+    if (tags.isGroup) {
+      await reply('File upload command currently supports DMs only.');
+      return;
+    }
     if (!process.env.UPLOAD_FILE_PATH) {
-      await client.sendMessage(senderPubkey, 'Set UPLOAD_FILE_PATH to send a file.');
+      await reply('Set UPLOAD_FILE_PATH to send a file.');
       return;
     }
     await client.sendFile(senderPubkey, process.env.UPLOAD_FILE_PATH);

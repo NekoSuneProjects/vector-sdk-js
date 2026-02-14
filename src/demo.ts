@@ -2,7 +2,8 @@ import { EventEmitter } from 'events';
 import type { Event } from 'nostr-tools';
 import * as nip04 from 'nostr-tools/nip04';
 import * as nip59 from 'nostr-tools/nip59';
-import { EncryptedDirectMessage, PrivateDirectMessage } from 'nostr-tools/kinds';
+import { ChatMessage, EncryptedDirectMessage, PrivateDirectMessage } from 'nostr-tools/kinds';
+import { finalizeEvent } from 'nostr-tools/pure';
 
 import { VectorBot } from './bot.js';
 import { createGiftWrapSubscription } from './subscription.js';
@@ -21,6 +22,11 @@ export type BotProfile = {
 export type BotClientOptions = {
   privateKey: string;
   relays: string[];
+  groupIds?: string[];
+  autoDiscoverGroups?: boolean;
+  discoverGroupsFromHistory?: boolean;
+  historySinceHours?: number;
+  historyMaxEvents?: number;
   debug?: boolean;
   profile?: Partial<BotProfile>;
   reconnect?: boolean;
@@ -29,6 +35,9 @@ export type BotClientOptions = {
 
 export type MessageTags = {
   pubkey: string;
+  conversationId: string;
+  groupId?: string;
+  isGroup?: boolean;
   kind: number;
   rawEvent: Event;
   wrapped?: boolean;
@@ -39,15 +48,27 @@ export class VectorBotClient extends EventEmitter {
   private bot?: VectorBot;
   private giftWrapSubscription?: { close: (reason?: string) => void };
   private dmSubscription?: { close: (reason?: string) => void };
+  private groupSubscription?: { close: (reason?: string) => void };
   private readonly options: BotClientOptions;
   private readonly profileCache = new Map<string, { name?: string; displayName?: string }>();
   private readonly connectionState = new Map<string, boolean>();
   private readonly reconnectingRelays = new Set<string>();
+  private readonly knownGroupIds = new Set<string>();
   private connectionMonitor?: NodeJS.Timeout;
 
   constructor(options: BotClientOptions) {
     super();
     this.options = options;
+    for (const groupId of options.groupIds ?? []) {
+      const normalized = groupId.trim();
+      if (normalized) {
+        this.knownGroupIds.add(normalized);
+      }
+    }
+  }
+
+  public getKnownGroupIds(): string[] {
+    return Array.from(this.knownGroupIds);
   }
 
   public async connect(): Promise<void> {
@@ -84,6 +105,7 @@ export class VectorBotClient extends EventEmitter {
 
     this.bot = bot;
     this.log('Connected. Bot public key:', bot.publicKey);
+    await this.bootstrapKnownGroups(bot);
     this.setupSubscriptions(bot);
     this.startConnectionMonitor(bot);
     this.emit('ready', {
@@ -118,6 +140,34 @@ export class VectorBotClient extends EventEmitter {
     return sent;
   }
 
+  public async sendGroupMessage(groupId: string, message: string): Promise<boolean> {
+    if (!this.bot) {
+      throw new Error('Bot is not connected');
+    }
+
+    const normalizedGroupId = groupId.trim();
+    if (!normalizedGroupId) {
+      throw new Error('Missing groupId');
+    }
+
+    const event = finalizeEvent(
+      {
+        kind: ChatMessage,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [
+          ['h', normalizedGroupId],
+          ['ms', (Date.now() % 1000).toString()],
+        ],
+        content: message,
+      },
+      this.bot.privateKeyBytes,
+    );
+
+    await this.bot.client.publishEvent(event);
+    this.log('Sent group message to', normalizedGroupId);
+    return true;
+  }
+
   public close(): void {
     if (!this.bot) {
       return;
@@ -129,6 +179,7 @@ export class VectorBotClient extends EventEmitter {
     }
     this.giftWrapSubscription?.close('shutdown');
     this.dmSubscription?.close('shutdown');
+    this.groupSubscription?.close('shutdown');
     this.bot.client.pool.close(this.bot.client.relays);
   }
 
@@ -203,6 +254,75 @@ export class VectorBotClient extends EventEmitter {
         this.emit('disconnect', { relay: 'dm', error: new Error(reasons.join(', ')) });
       },
     });
+
+    const autoDiscoverGroups = this.options.autoDiscoverGroups === true;
+    const groupIds = this.getKnownGroupIds();
+    if (!autoDiscoverGroups && !groupIds.length) {
+      this.groupSubscription = undefined;
+      return;
+    }
+
+    const groupFilter = {
+      kinds: [ChatMessage],
+      ...(autoDiscoverGroups ? {} : { '#h': groupIds }),
+    };
+
+    this.groupSubscription = bot.client.pool.subscribe(bot.client.relays, groupFilter, {
+      onevent: (event) => this.handleGroupMessage(bot, event),
+      onclose: (reasons) => {
+        this.log('Group subscription closed:', reasons);
+        this.emit('disconnect', { relay: 'group', error: new Error(reasons.join(', ')) });
+      },
+    });
+  }
+
+  private async bootstrapKnownGroups(bot: VectorBot): Promise<void> {
+    if (!this.options.discoverGroupsFromHistory) {
+      return;
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    const sinceHours = Math.max(1, this.options.historySinceHours ?? 24 * 7);
+    const limit = Math.max(10, this.options.historyMaxEvents ?? 500);
+
+    try {
+      const events = await bot.client.pool.querySync(
+        bot.client.relays,
+        {
+          kinds: [ChatMessage],
+          since: now - sinceHours * 3600,
+          limit,
+        },
+        { maxWait: 4000 },
+      );
+
+      let discovered = 0;
+      for (const event of events) {
+        const groupId = this.findFirstTagValue(event, 'h');
+        if (!groupId) {
+          continue;
+        }
+        if (!this.knownGroupIds.has(groupId)) {
+          this.knownGroupIds.add(groupId);
+          discovered += 1;
+          this.emit('group_discovered', {
+            groupId,
+            eventId: event.id,
+            sender: event.pubkey,
+            source: 'history',
+          });
+        }
+      }
+
+      this.log('Group history bootstrap complete. discovered:', discovered, 'known:', this.knownGroupIds.size);
+      this.emit('group_bootstrap_complete', {
+        discovered,
+        knownGroupIds: this.getKnownGroupIds(),
+      });
+    } catch (error) {
+      this.log('Group history bootstrap failed:', error);
+      this.emit('error', error);
+    }
   }
 
   private handleGiftWrap(bot: VectorBot, event: Event): void {
@@ -234,6 +354,34 @@ export class VectorBotClient extends EventEmitter {
     }
   }
 
+  private handleGroupMessage(bot: VectorBot, event: Event): void {
+    if (event.kind !== ChatMessage) {
+      this.log('Unhandled group event:', event);
+      return;
+    }
+
+    const groupId = this.findFirstTagValue(event, 'h');
+    if (!groupId) {
+      this.log('Skipping group event without h tag:', event.id);
+      return;
+    }
+
+    if (!this.knownGroupIds.has(groupId)) {
+      this.knownGroupIds.add(groupId);
+      this.log('Discovered group:', groupId);
+      this.emit('group_discovered', { groupId, eventId: event.id, sender: event.pubkey, source: 'live' });
+    }
+
+    this.emitMessage(bot, event.pubkey, event.kind, event, event.content, false, {
+      conversationId: groupId,
+      groupId,
+      isGroup: true,
+    }).catch((error) => {
+      this.log('Failed to emit group message:', error);
+      this.emit('error', error);
+    });
+  }
+
   private async emitMessage(
     bot: VectorBot,
     pubkey: string,
@@ -241,21 +389,36 @@ export class VectorBotClient extends EventEmitter {
     rawEvent: Event,
     content: string,
     wrapped: boolean,
+    override?: { conversationId?: string; groupId?: string; isGroup?: boolean },
   ): Promise<void> {
     const profile = await this.getProfile(bot, pubkey);
+    const conversationId = override?.conversationId ?? pubkey;
+    const self = pubkey === bot.publicKey;
     this.emit(
       'message',
       pubkey,
       {
         pubkey,
+        conversationId,
+        groupId: override?.groupId,
+        isGroup: override?.isGroup ?? false,
         kind,
         rawEvent,
         wrapped,
         displayName: profile?.displayName || profile?.name,
       },
       content,
-      false,
+      self,
     );
+  }
+
+  private findFirstTagValue(event: Event, tagName: string): string | undefined {
+    for (const tag of event.tags) {
+      if (tag[0] === tagName && typeof tag[1] === 'string') {
+        return tag[1];
+      }
+    }
+    return undefined;
   }
 
   private async getProfile(
