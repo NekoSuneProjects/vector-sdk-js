@@ -6,3 +6,4 @@ export * from './crypto.js';
 export * from './keys.js';
 export * from './upload.js';
 export * from './demo.js';
+export * from './mls-sidecar-adapter.js';

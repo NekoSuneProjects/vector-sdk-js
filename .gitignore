@@ -44,6 +44,7 @@ node_modules/
 
 # Output of 'npm pack'
 *.tgz
+.vector-mls-sidecar
 
 # Yarn Integrity file
 .yarn-integrity
@@ -51,6 +52,8 @@ node_modules/
 # dotenv environment variables using dotenv package
 .env
 .env.test
+check-bot-invites.bat
+test-mls-sidecar.bat
 
 # parcel-bundler cache (https://parceljs.org/)
 .cache

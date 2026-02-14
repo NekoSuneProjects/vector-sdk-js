@@ -14,6 +14,7 @@ export type BotClientOptions = {
     relays: string[];
     groupIds?: string[];
     vectorOnly?: boolean;
+    mlsAdapter?: MlsAdapter;
     autoDiscoverGroups?: boolean;
     discoverGroupsFromHistory?: boolean;
     historySinceHours?: number;
@@ -23,6 +24,58 @@ export type BotClientOptions = {
     reconnect?: boolean;
     reconnectIntervalMs?: number;
 };
+export type MlsDecryptedMessage = {
+    groupId: string;
+    senderPubkey: string;
+    content: string;
+    kind?: number;
+};
+export type MlsAdapter = {
+    ensureKeyPackage?: (context: {
+        botPublicKey: string;
+        botPrivateKey: string;
+        relays: string[];
+    }) => Promise<{
+        published: boolean;
+        eventId?: string;
+    } | null>;
+    syncWelcomes?: (context: {
+        botPublicKey: string;
+        botPrivateKey: string;
+        relays: string[];
+        sinceHours?: number;
+        limit?: number;
+    }) => Promise<{
+        processed: number;
+        accepted?: number;
+        groups: string[];
+    } | null>;
+    processWelcome?: (input: {
+        wrapperEvent: Event;
+        rumorJson: string;
+        groupIdHint?: string;
+        context: {
+            botPublicKey: string;
+            botPrivateKey: string;
+            botPrivateKeyBytes: Uint8Array;
+            relays: string[];
+        };
+    }) => Promise<{
+        groupId?: string;
+    } | null>;
+    decryptGroupWrapper: (wrapper: Event) => Promise<MlsDecryptedMessage | null>;
+    sendGroupMessage?: (groupId: string, message: string, context: {
+        botPublicKey: string;
+        botPrivateKey: string;
+        botPrivateKeyBytes: Uint8Array;
+        relays: string[];
+    }) => Promise<boolean>;
+    bootstrapGroups?: (context: {
+        botPublicKey: string;
+        relays: string[];
+        knownGroupIds: string[];
+    }) => Promise<string[]>;
+};
 export type MessageTags = {
     pubkey: string;
     conversationId: string;
@@ -30,6 +83,7 @@ export type MessageTags = {
     isGroup?: boolean;
     botInGroup?: boolean;
     directedToBot?: boolean;
+    origin?: 'dm' | 'group';
     kind: number;
     rawEvent: Event;
     wrapped?: boolean;
@@ -43,11 +97,17 @@ export declare class VectorBotClient extends EventEmitter {
     private readonly options;
     private readonly profileCache;
     private readonly connectionState;
+    private readonly relayDownStreak;
+    private readonly relayUpStreak;
+    private readonly relayLastReconnectAttemptAt;
     private readonly reconnectingRelays;
     private readonly configuredGroupIds;
     private readonly joinedGroupIds;
     private readonly knownGroupIds;
+    private readonly observedGroupIds;
+    private readonly seenMessageIds;
     private connectionMonitor?;
+    private connectionMonitorStartedAt;
     constructor(options: BotClientOptions);
     getKnownGroupIds(): string[];
     connect(): Promise<void>;
@@ -60,12 +120,16 @@ export declare class VectorBotClient extends EventEmitter {
     private setupSubscriptions;
     private bootstrapKnownGroups;
     private handleGiftWrap;
+    private normalizeRumorWrapperEvent;
     private handleDirectMessage;
     private handleGroupMessage;
     private emitMessage;
     private findFirstTagValue;
+    private extractGroupIdFromEvent;
     private isGroupMessageDirectedToBot;
+    private isGroupContentDirectedToBot;
     private isBotInGroup;
+    private isGroupTracked;
     private getProfile;
     private log;
 }

@@ -11,6 +11,8 @@ A JavaScript/TypeScript port of the Vector Bot SDK that mirrors the structure of
 - Optional history bootstrap (`discoverGroupsFromHistory`) to discover already-active groups at startup.
 - Group command safety: `tags.directedToBot` lets you ignore commands not addressed to the bot.
 - Group command routing: plain `!command` in groups is accepted only when `tags.botInGroup` is true.
+- MLS detection path: GiftWrap unwrapping checks for MLS welcome (`kind:443`) and emits `mls_welcome`.
+- Vector private group decrypt/send requires `mlsAdapter` (bridge to MLS engine).
 - Metadata builders, filters, and utilities ported from the Rust implementation.
 - AES-256-GCM file encryption helpers and attachment helpers with extension inference.
 - Upload helpers that target the trusted NIP-96 server used by Vector and emit progress callbacks.
@@ -25,6 +27,14 @@ Then import the pieces you need:
 
 ```ts
 import { VectorBotClient } from '@nekosuneprojects/vector-sdk';
+import { createMlsSidecarAdapter } from '@nekosuneprojects/vector-sdk';
+
+const mlsAdapter = process.env.MLS_SIDECAR_BIN
+  ? createMlsSidecarAdapter({
+      binPath: process.env.MLS_SIDECAR_BIN,
+      stateDir: process.env.MLS_STATE_DIR ?? '.vector-mls-sidecar',
+    })
+  : undefined;
 
 const client = new VectorBotClient({
   privateKey: process.env.NOSTR_PRIVATE_KEY,
@@ -38,6 +48,7 @@ const client = new VectorBotClient({
     .map((groupId) => groupId.trim())
     .filter(Boolean),
   vectorOnly: true,
+  mlsAdapter,
   autoDiscoverGroups: true,
   discoverGroupsFromHistory: true,
   historySinceHours: Number(process.env.NOSTR_GROUP_HISTORY_HOURS ?? 24 * 14),
@@ -85,6 +96,10 @@ client.on('group_wrapper', ({ groupId }) => {
   console.log(`Vector MLS wrapper seen for group ${groupId}`);
 });
 
+client.on('mls_welcome', () => {
+  console.log('Vector MLS welcome received');
+});
+
 client.on('message', async (senderPubkey, tags, message, self) => {
   if (self) return;
   if (tags.isGroup && !tags.botInGroup) return;
@@ -123,7 +138,7 @@ process.on('SIGINT', () => {
 });
 ```
 
-Note: Vector private groups are MLS-encrypted wrappers (`kind:444`). This SDK can discover those groups from `h` tags, but cannot read plaintext commands from those wrappers yet.
+For Vector private groups, set `MLS_SIDECAR_BIN` to the compiled Rust sidecar binary (`RUST/mls-sidecar`) so group wrappers can be decrypted and group replies can be sent.
 
 ## Building
 
