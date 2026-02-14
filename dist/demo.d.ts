@@ -1,0 +1,64 @@
+import { EventEmitter } from 'events';
+import type { Event } from 'nostr-tools';
+export type BotProfile = {
+    name: string;
+    displayName: string;
+    about: string;
+    picture: string;
+    banner: string;
+    nip05: string;
+    lud16: string;
+};
+export type BotClientOptions = {
+    privateKey: string;
+    relays: string[];
+    groupIds?: string[];
+    autoDiscoverGroups?: boolean;
+    discoverGroupsFromHistory?: boolean;
+    historySinceHours?: number;
+    historyMaxEvents?: number;
+    debug?: boolean;
+    profile?: Partial<BotProfile>;
+    reconnect?: boolean;
+    reconnectIntervalMs?: number;
+};
+export type MessageTags = {
+    pubkey: string;
+    conversationId: string;
+    groupId?: string;
+    isGroup?: boolean;
+    kind: number;
+    rawEvent: Event;
+    wrapped?: boolean;
+    displayName?: string;
+};
+export declare class VectorBotClient extends EventEmitter {
+    private bot?;
+    private giftWrapSubscription?;
+    private dmSubscription?;
+    private groupSubscription?;
+    private readonly options;
+    private readonly profileCache;
+    private readonly connectionState;
+    private readonly reconnectingRelays;
+    private readonly knownGroupIds;
+    private connectionMonitor?;
+    constructor(options: BotClientOptions);
+    getKnownGroupIds(): string[];
+    connect(): Promise<void>;
+    sendMessage(recipient: string, message: string): Promise<boolean>;
+    sendFile(recipient: string, filePath: string): Promise<boolean>;
+    sendGroupMessage(groupId: string, message: string): Promise<boolean>;
+    close(): void;
+    private startConnectionMonitor;
+    private reconnectRelay;
+    private setupSubscriptions;
+    private bootstrapKnownGroups;
+    private handleGiftWrap;
+    private handleDirectMessage;
+    private handleGroupMessage;
+    private emitMessage;
+    private findFirstTagValue;
+    private getProfile;
+    private log;
+}
