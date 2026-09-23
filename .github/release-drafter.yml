@@ -1,0 +1,87 @@
+name-template: 'v$RESOLVED_VERSION'
+tag-template: 'v$RESOLVED_VERSION'
+
+categories:
+  - title: '🚀 Features'
+    label: 'feature'
+  - title: '🐛 Bug Fixes'
+    label: 'bug'
+  - title: '🛠 Maintenance'
+    label: 'maintenance'
+  - title: '📚 Documentation'
+    label: 'documentation'
+  - title: '⬆️ Dependencies'
+    collapse-after: 3
+    labels:
+      - 'dependencies'
+
+change-template: '- $TITLE (#$NUMBER) by @$AUTHOR'
+no-changes-template: 'No changes'
+
+exclude-labels:
+  - 'skip-changelog'
+
+# Which part of the version the next release bumps. Patch is the default, so
+# with no label this behaves exactly like $NEXT_PATCH_VERSION; add `minor` or
+# `major` to a PR and the drafted tag moves accordingly.
+version-resolver:
+  major:
+    labels:
+      - 'major'
+      - 'breaking'
+  minor:
+    labels:
+      - 'minor'
+      - 'feature'
+  patch:
+    labels:
+      - 'patch'
+      - 'bug'
+      - 'maintenance'
+      - 'dependencies'
+      - 'documentation'
+  default: patch
+
+# Labels are what the categories above sort on, so label PRs automatically from
+# their branch name and conventional-commit title. Without this, an unlabelled
+# PR lands in the release notes with no category.
+autolabeler:
+  - label: 'feature'
+    branch:
+      - '/^feat(ure)?[/-].+/'
+    title:
+      - '/^feat(\(.+\))?!?:/'
+  - label: 'bug'
+    branch:
+      - '/^(fix|bug|hotfix)[/-].+/'
+    title:
+      - '/^fix(\(.+\))?!?:/'
+  - label: 'documentation'
+    branch:
+      - '/^docs?[/-].+/'
+    title:
+      - '/^docs(\(.+\))?:/'
+    files:
+      - '**/*.md'
+  - label: 'maintenance'
+    branch:
+      - '/^(chore|refactor|ci|build|test|perf|style)[/-].+/'
+    title:
+      - '/^(chore|refactor|ci|build|test|perf|style)(\(.+\))?:/'
+  - label: 'dependencies'
+    title:
+      - '/^(deps|build\(deps\))(\(.+\))?:/'
+    files:
+      - 'package.json'
+      - 'package-lock.json'
+  - label: 'major'
+    title:
+      - '/^\w+(\(.+\))?!:/'
+
+template: |
+
+  ## What's Changed
+
+  $CHANGES
+
+  **Full Changelog**: https://github.com/$OWNER/$REPOSITORY/compare/$PREVIOUS_TAG...v$RESOLVED_VERSION
