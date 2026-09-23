@@ -1,5 +1,7 @@
 import { EventEmitter } from 'events';
 import type { Event } from 'nostr-tools';
+import type { AttachmentFile, ReceivedAttachment, SendOptions, SendResult } from './bot.js';
+import { CommandBuilder } from './commands.js';
 export type BotProfile = {
     name: string;
     displayName: string;
@@ -23,6 +25,29 @@ export type BotClientOptions = {
     profile?: Partial<BotProfile>;
     reconnect?: boolean;
     reconnectIntervalMs?: number;
+    /**
+     * Also send DMs as NIP-04 (kind 4). Vector ignores kind 4, so this is off by
+     * default; turn it on only to reach a client that still speaks it.
+     */
+    legacyNip04?: boolean;
+    /**
+     * Gift-wrap a copy of every outgoing message to the bot itself, so the
+     * account's other devices see what this one sent. On by default, matching
+     * Vector.
+     */
+    selfWrap?: boolean;
+    /**
+     * Deliver gift wraps to the recipient's published NIP-17 inbox relays
+     * (kind 10050) instead of only the bot's own set. On by default.
+     */
+    useInboxRelays?: boolean;
+    /** Extra relays for manifest and inbox-list discovery. */
+    discoveryRelays?: string[];
+    /**
+     * Publish the slash-command manifest on connect. On by default whenever at
+     * least one command is registered.
+     */
+    publishManifest?: boolean;
 };
 export type MlsDecryptedMessage = {
     groupId: string;
@@ -88,6 +113,17 @@ export type MessageTags = {
     rawEvent: Event;
     wrapped?: boolean;
     displayName?: string;
+    /** The durable message id — the rumor id, which replies and edits reference. */
+    messageId?: string;
+    /** Message id this is a threaded reply to, from the `e`/`reply` tag. */
+    replyTo?: string;
+    /**
+     * Bots this message is addressed to, as npubs, from `["bot", …]` tags.
+     * Empty means broadcast.
+     */
+    addressedBots?: string[];
+    /** Present when the message carried a file attachment. */
+    attachment?: ReceivedAttachment;
 };
 export declare class VectorBotClient extends EventEmitter {
     private bot?;
@@ -106,13 +142,66 @@ export declare class VectorBotClient extends EventEmitter {
     private readonly knownGroupIds;
     private readonly observedGroupIds;
     private readonly seenMessageIds;
+    private readonly commandRegistry;
     private connectionMonitor?;
     private connectionMonitorStartedAt;
     constructor(options: BotClientOptions);
     getKnownGroupIds(): string[];
+    /**
+     * Register a slash command. Chain typed args, then attach the handler:
+     *
+     * ```ts
+     * client.command('roll', 'Roll a die')
+     *   .int('sides', 'How many sides')
+     *   .run(async (ctx) => {
+     *     const sides = ctx.int('sides') ?? 6;
+     *     await ctx.reply(`you rolled a d${sides}`);
+     *   });
+     * ```
+     *
+     * The manifest publishes when the client connects, so every Vector client
+     * renders a `/` picker with a field per argument. A matched invocation runs
+     * its handler and is consumed — it never reaches the `message` event.
+     */
+    command(name: string, description: string): CommandBuilder<MessageTags>;
+    /** The manifest derived from every registered command, in registration order. */
+    getCommandManifest(): import("./bot-interface.js").BotManifest;
     connect(): Promise<void>;
-    sendMessage(recipient: string, message: string): Promise<boolean>;
-    sendFile(recipient: string, filePath: string): Promise<boolean>;
+    /**
+     * Publish the command manifest over the widest useful reach: the bot's own
+     * relays plus the public discovery indexers.
+     *
+     * The indexers matter because community relays are pool-isolated and some
+     * drop events from strangers, which would otherwise leave a bot's commands
+     * undiscoverable to exactly the people in the room with it.
+     */
+    private publishInterfaceManifest;
+    sendMessage(recipient: string, message: string, options?: SendOptions): Promise<boolean>;
+    /**
+     * Send a DM and get the message id back — what {@link replyTo},
+     * {@link editMessage}, {@link react} and {@link deleteMessage} reference.
+     */
+    send(recipient: string, message: string, options?: SendOptions): Promise<SendResult>;
+    /** Send a threaded reply to `messageId` in a DM. */
+    replyTo(recipient: string, messageId: string, message: string, options?: SendOptions): Promise<SendResult>;
+    /** Edit a DM the bot sent. */
+    editMessage(recipient: string, messageId: string, newContent: string): Promise<SendResult>;
+    /** Delete a DM the bot sent (NIP-09). */
+    deleteMessage(recipient: string, messageId: string, reason?: string): Promise<boolean>;
+    /** React to a message. Pass `:shortcode:` plus `emojiUrl` for a custom emoji. */
+    react(recipient: string, messageId: string, emoji: string, options?: {
+        emojiUrl?: string;
+    }): Promise<SendResult>;
+    /** Show a typing indicator in a DM. */
+    typing(recipient: string): Promise<boolean>;
+    sendFile(recipient: string, filePath: string, options?: SendOptions): Promise<boolean>;
+    /** Send an already-loaded attachment, returning its message id. */
+    sendAttachment(recipient: string, file: AttachmentFile, options?: SendOptions): Promise<SendResult>;
+    /** Download a received attachment, decrypting it when it carries a key. */
+    downloadAttachment(attachment: ReceivedAttachment): Promise<Buffer>;
+    /** Download a received attachment and write it to `destination`. */
+    saveAttachment(attachment: ReceivedAttachment, destination: string): Promise<string>;
+    private requireBot;
     sendGroupMessage(groupId: string, message: string): Promise<boolean>;
     close(): void;
     private startConnectionMonitor;
@@ -124,6 +213,17 @@ export declare class VectorBotClient extends EventEmitter {
     private handleDirectMessage;
     private handleGroupMessage;
     private emitMessage;
+    /**
+     * Run `content` as a command if it matches a registration. Returns true when
+     * the message was consumed.
+     *
+     * A parse that matches a command *name* but fails typing or a required check
+     * replies with the canonical error and still consumes — a half-valid
+     * invocation shouldn't leak into chat handlers as if it were conversation.
+     */
+    private tryCommand;
+    /** This bot's npub, once connected. */
+    private npub;
     private findFirstTagValue;
     private extractGroupIdFromEvent;
     private isGroupMessageDirectedToBot;

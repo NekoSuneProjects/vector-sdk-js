@@ -1,10 +1,14 @@
 import { EventEmitter } from 'events';
+import { nip19 } from 'nostr-tools';
 import * as nip04 from 'nostr-tools/nip04';
 import * as nip59 from 'nostr-tools/nip59';
 import { ChatMessage, EncryptedDirectMessage, PrivateDirectMessage } from 'nostr-tools/kinds';
 import { finalizeEvent } from 'nostr-tools/pure';
 import { VectorBot } from './bot.js';
-import { loadFile } from './bot.js';
+import { loadFile, parseAttachment } from './bot.js';
+import { addressedBots, CommandArgError, manifestToEvent, parseCommandText, typedArgs, usageLine, } from './bot-interface.js';
+import { argAccessors, CommandBuilder, CommandRegistry } from './commands.js';
+import { APPLICATION_SPECIFIC, DELETION, FILE_ATTACHMENT, MESSAGE_EDIT, REACTION, } from './kinds.js';
 export class VectorBotClient extends EventEmitter {
     constructor(options) {
         super();
@@ -19,6 +23,7 @@ export class VectorBotClient extends EventEmitter {
         this.knownGroupIds = new Set();
         this.observedGroupIds = new Set();
         this.seenMessageIds = new Set();
+        this.commandRegistry = new CommandRegistry();
         this.connectionMonitorStartedAt = 0;
         this.options = options;
         for (const groupId of options.groupIds ?? []) {
@@ -32,6 +37,29 @@ export class VectorBotClient extends EventEmitter {
     }
     getKnownGroupIds() {
         return Array.from(this.knownGroupIds);
+    }
+    /**
+     * Register a slash command. Chain typed args, then attach the handler:
+     *
+     * ```ts
+     * client.command('roll', 'Roll a die')
+     *   .int('sides', 'How many sides')
+     *   .run(async (ctx) => {
+     *     const sides = ctx.int('sides') ?? 6;
+     *     await ctx.reply(`you rolled a d${sides}`);
+     *   });
+     * ```
+     *
+     * The manifest publishes when the client connects, so every Vector client
+     * renders a `/` picker with a field per argument. A matched invocation runs
+     * its handler and is consumed — it never reaches the `message` event.
+     */
+    command(name, description) {
+        return new CommandBuilder(this.commandRegistry, name, description);
+    }
+    /** The manifest derived from every registered command, in registration order. */
+    getCommandManifest() {
+        return this.commandRegistry.manifest();
     }
     async connect() {
         if (!this.options.privateKey) {
@@ -50,9 +78,16 @@ export class VectorBotClient extends EventEmitter {
             lud16: '',
             ...this.options.profile,
         };
-        const bot = await VectorBot.new(this.options.privateKey, profile.name, profile.displayName, profile.about, profile.picture, profile.banner, profile.nip05, profile.lud16, { defaultRelays: this.options.relays });
+        const bot = await VectorBot.new(this.options.privateKey, profile.name, profile.displayName, profile.about, profile.picture, profile.banner, profile.nip05, profile.lud16, {
+            defaultRelays: this.options.relays,
+            legacyNip04: this.options.legacyNip04,
+            selfWrap: this.options.selfWrap,
+            useInboxRelays: this.options.useInboxRelays,
+            discoveryRelays: this.options.discoveryRelays,
+        });
         this.bot = bot;
         this.log('Connected. Bot public key:', bot.publicKey);
+        await this.publishInterfaceManifest(bot);
         if (this.options.mlsAdapter?.ensureKeyPackage) {
             try {
                 const result = await this.options.mlsAdapter.ensureKeyPackage({
@@ -79,26 +114,96 @@ export class VectorBotClient extends EventEmitter {
                 name: profile.name,
                 displayName: profile.displayName,
             },
+            commands: this.commandRegistry.size,
+            knownGroupIds: this.getKnownGroupIds(),
         });
     }
-    async sendMessage(recipient, message) {
-        if (!this.bot) {
-            throw new Error('Bot is not connected');
+    /**
+     * Publish the command manifest over the widest useful reach: the bot's own
+     * relays plus the public discovery indexers.
+     *
+     * The indexers matter because community relays are pool-isolated and some
+     * drop events from strangers, which would otherwise leave a bot's commands
+     * undiscoverable to exactly the people in the room with it.
+     */
+    async publishInterfaceManifest(bot) {
+        if (this.commandRegistry.isEmpty() || this.options.publishManifest === false) {
+            return;
         }
-        const channel = this.bot.getChat(recipient);
-        const sent = await channel.sendPrivateMessage(message);
-        this.log('Sent message to', recipient, 'status:', sent);
-        return sent;
+        try {
+            const manifest = this.commandRegistry.manifest();
+            const event = manifestToEvent(manifest, bot.privateKeyBytes);
+            const relays = Array.from(new Set([...bot.client.relays, ...bot.client.discoveryRelays]));
+            await bot.client.publishEvent(event, relays);
+            this.log('Published interface manifest:', this.commandRegistry.size, 'command(s)');
+            this.emit('manifest_published', {
+                commands: manifest.commands?.length ?? 0,
+                relays,
+            });
+        }
+        catch (error) {
+            this.log('Manifest publish failed:', error);
+            this.emit('error', error);
+        }
     }
-    async sendFile(recipient, filePath) {
+    async sendMessage(recipient, message, options = {}) {
+        const result = await this.send(recipient, message, options);
+        return result.sent;
+    }
+    /**
+     * Send a DM and get the message id back — what {@link replyTo},
+     * {@link editMessage}, {@link react} and {@link deleteMessage} reference.
+     */
+    async send(recipient, message, options = {}) {
+        const channel = this.requireBot().getChat(recipient);
+        const result = await channel.send(message, options);
+        this.log('Sent message to', recipient, 'id:', result.id, 'status:', result.sent);
+        return result;
+    }
+    /** Send a threaded reply to `messageId` in a DM. */
+    async replyTo(recipient, messageId, message, options = {}) {
+        return this.send(recipient, message, { ...options, replyTo: messageId });
+    }
+    /** Edit a DM the bot sent. */
+    async editMessage(recipient, messageId, newContent) {
+        return this.requireBot().getChat(recipient).edit(messageId, newContent);
+    }
+    /** Delete a DM the bot sent (NIP-09). */
+    async deleteMessage(recipient, messageId, reason = '') {
+        return this.requireBot().getChat(recipient).delete(messageId, reason);
+    }
+    /** React to a message. Pass `:shortcode:` plus `emojiUrl` for a custom emoji. */
+    async react(recipient, messageId, emoji, options = {}) {
+        return this.requireBot().getChat(recipient).react(messageId, emoji, options);
+    }
+    /** Show a typing indicator in a DM. */
+    async typing(recipient) {
+        return this.requireBot().getChat(recipient).typing();
+    }
+    async sendFile(recipient, filePath, options = {}) {
+        const channel = this.requireBot().getChat(recipient);
+        const file = await loadFile(filePath);
+        const result = await channel.sendFile(file, options);
+        this.log('Sent file to', recipient, 'id:', result.id, 'status:', result.sent);
+        return result.sent;
+    }
+    /** Send an already-loaded attachment, returning its message id. */
+    async sendAttachment(recipient, file, options = {}) {
+        return this.requireBot().getChat(recipient).sendFile(file, options);
+    }
+    /** Download a received attachment, decrypting it when it carries a key. */
+    async downloadAttachment(attachment) {
+        return this.requireBot().downloadAttachment(attachment);
+    }
+    /** Download a received attachment and write it to `destination`. */
+    async saveAttachment(attachment, destination) {
+        return this.requireBot().saveAttachment(attachment, destination);
+    }
+    requireBot() {
         if (!this.bot) {
             throw new Error('Bot is not connected');
         }
-        const channel = this.bot.getChat(recipient);
-        const file = await loadFile(filePath);
-        const sent = await channel.sendPrivateFile(file);
-        this.log('Sent file to', recipient, 'status:', sent);
-        return sent;
+        return this.bot;
     }
     async sendGroupMessage(groupId, message) {
         if (!this.bot) {
@@ -406,7 +511,59 @@ export class VectorBotClient extends EventEmitter {
             const rumor = nip59.unwrapEvent(event, bot.privateKeyBytes);
             this.log('Gift-wrap rumor:', rumor);
             if (emitDirectMessages && rumor.kind === PrivateDirectMessage && rumor.content) {
-                this.emitMessage(bot, rumor.pubkey, rumor.kind, event, rumor.content, true);
+                this.emitMessage(bot, rumor.pubkey, rumor.kind, event, rumor.content, true, { rumor });
+                return;
+            }
+            // A file attachment is an ordinary message that happens to carry a file:
+            // it surfaces on `message` like any other, with the parsed attachment on
+            // its tags, so a handler that ignores files needs no extra branch.
+            if (emitDirectMessages && rumor.kind === FILE_ATTACHMENT) {
+                const attachment = parseAttachment(rumor);
+                if (attachment) {
+                    this.emit('attachment', {
+                        sender: rumor.pubkey,
+                        messageId: rumor.id,
+                        attachment,
+                        rawEvent: event,
+                    });
+                    this.emitMessage(bot, rumor.pubkey, rumor.kind, event, rumor.content, true, {
+                        rumor,
+                        attachment,
+                    });
+                }
+                return;
+            }
+            if (emitDirectMessages && rumor.kind === MESSAGE_EDIT) {
+                this.emit('message_update', {
+                    sender: rumor.pubkey,
+                    messageId: this.findFirstTagValue(rumor, 'e'),
+                    editId: rumor.id,
+                    content: rumor.content,
+                    rawEvent: event,
+                });
+                return;
+            }
+            if (emitDirectMessages && rumor.kind === REACTION) {
+                this.emit('reaction', {
+                    sender: rumor.pubkey,
+                    messageId: this.findFirstTagValue(rumor, 'e'),
+                    emoji: rumor.content,
+                    emojiUrl: rumor.tags.find((tag) => tag[0] === 'emoji')?.[2],
+                    rawEvent: event,
+                });
+                return;
+            }
+            if (emitDirectMessages && rumor.kind === DELETION) {
+                this.emit('message_delete', {
+                    sender: rumor.pubkey,
+                    messageId: this.findFirstTagValue(rumor, 'e'),
+                    reason: rumor.content,
+                    rawEvent: event,
+                });
+                return;
+            }
+            if (emitDirectMessages && rumor.kind === APPLICATION_SPECIFIC && rumor.content === 'typing') {
+                this.emit('typing', { sender: rumor.pubkey, rawEvent: event });
                 return;
             }
             if (rumor.kind === VECTOR_MLS_GROUP_WRAPPER_KIND) {
@@ -595,7 +752,9 @@ export class VectorBotClient extends EventEmitter {
         const profile = await this.getProfile(bot, pubkey);
         const conversationId = override?.conversationId ?? pubkey;
         const self = pubkey === bot.publicKey;
-        this.emit('message', pubkey, {
+        const rumorTags = override?.rumor?.tags ?? rawEvent.tags;
+        const replyTag = rumorTags.find((tag) => tag[0] === 'e');
+        const tags = {
             pubkey,
             conversationId,
             groupId: override?.groupId,
@@ -607,7 +766,122 @@ export class VectorBotClient extends EventEmitter {
             rawEvent,
             wrapped,
             displayName: profile?.displayName || profile?.name,
-        }, content, self);
+            messageId: override?.rumor?.id ?? rawEvent.id,
+            replyTo: replyTag?.[1],
+            addressedBots: addressedBots(rumorTags),
+            attachment: override?.attachment,
+        };
+        // A registered command consumes the message: it runs its handler and never
+        // reaches `message`, so command routing and free-form chat can live side by
+        // side without a handler having to re-parse the text.
+        if (!self && this.tryCommand(pubkey, tags, content)) {
+            return;
+        }
+        this.emit('message', pubkey, tags, content, self);
+    }
+    /**
+     * Run `content` as a command if it matches a registration. Returns true when
+     * the message was consumed.
+     *
+     * A parse that matches a command *name* but fails typing or a required check
+     * replies with the canonical error and still consumes — a half-valid
+     * invocation shouldn't leak into chat handlers as if it were conversation.
+     */
+    tryCommand(senderPubkey, tags, content) {
+        if (this.commandRegistry.isEmpty() || !this.bot) {
+            return false;
+        }
+        // Addressed to some other bot: ordinary chat for us, even on a manifest
+        // match, since two bots may share a command name. Untagged is broadcast —
+        // the legacy-client path — so the tag is never required.
+        const addressed = tags.addressedBots ?? [];
+        if (addressed.length) {
+            const myNpub = this.npub();
+            if (myNpub && !addressed.includes(myNpub)) {
+                return false;
+            }
+        }
+        const text = content.trim();
+        if (!text.startsWith('/')) {
+            return false;
+        }
+        const manifest = this.commandRegistry.manifest();
+        const parsed = parseCommandText(manifest, text);
+        if (!parsed) {
+            return false; // unknown command → ordinary chat, possibly for another bot
+        }
+        const registration = this.commandRegistry.find(parsed.name);
+        if (!registration) {
+            return false;
+        }
+        // Answering the invoker privately is always possible, including from a
+        // group: a DM is addressed to their pubkey, which a group invocation
+        // carries just the same.
+        const replyPrivately = async (replyText) => {
+            const result = await this.send(senderPubkey, replyText, {
+                // A group message id belongs to the group's transport, not the DM
+                // thread, so threading the DM to it would dangle.
+                replyTo: tags.isGroup ? undefined : tags.messageId,
+            });
+            return result.sent;
+        };
+        const reply = async (replyText) => {
+            if (tags.isGroup && tags.groupId) {
+                return this.sendGroupMessage(tags.groupId, replyText);
+            }
+            return replyPrivately(replyText);
+        };
+        const dm = async (user, replyText) => {
+            const result = await this.send(user, replyText);
+            return result.sent;
+        };
+        let args;
+        try {
+            args = typedArgs(registration.spec, parsed);
+        }
+        catch (error) {
+            const detail = error instanceof CommandArgError ? error.message : String(error);
+            this.log('Command rejected:', parsed.name, detail);
+            // The canonical two-line error: `{arg}: {reason}`, then `usage: {line}`.
+            // ASCII-only and split-on-first-newline parsable, so every implementation
+            // emits byte-identical text.
+            reply(`${detail}\nusage: ${usageLine(registration.spec)}`).catch((replyError) => {
+                this.emit('error', replyError);
+            });
+            return true;
+        }
+        const accessors = argAccessors(args);
+        const context = {
+            name: parsed.name,
+            message: tags,
+            senderPubkey,
+            isGroup: tags.isGroup ?? false,
+            groupId: tags.groupId,
+            raw: parsed.args,
+            ...accessors,
+            reply,
+            replyPrivately,
+            dm,
+        };
+        this.log('Command:', parsed.name, parsed.args);
+        this.emit('command', { name: parsed.name, senderPubkey, args: parsed.args });
+        Promise.resolve(registration.handler(context)).catch((error) => {
+            this.log('Command handler failed:', parsed.name, error);
+            this.emit('error', error);
+        });
+        return true;
+    }
+    /** This bot's npub, once connected. */
+    npub() {
+        if (!this.bot) {
+            return undefined;
+        }
+        try {
+            return nip19.npubEncode(this.bot.publicKey);
+        }
+        catch {
+            return undefined;
+        }
     }
     findFirstTagValue(eventLike, tagName) {
         for (const tag of eventLike.tags) {

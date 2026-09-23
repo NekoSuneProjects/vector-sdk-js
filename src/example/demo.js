@@ -46,9 +46,83 @@ const client = new VectorBotClient({
   },
 });
 
-client.on('ready', ({ pubkey, profile }) => {
+// ── Slash commands ──────────────────────────────────────────────────────────
+// Registered before connect(), so the manifest publishes on startup and Vector
+// clients render a `/` picker with a field per argument. A matched command is
+// consumed and never reaches the 'message' handler below.
+
+client.command('ping', 'Check the bot is alive').run(async (ctx) => {
+  await ctx.reply('pong');
+});
+
+client.command('echo', 'Repeat something back')
+  .string('text', 'What to repeat', true)
+  .run(async (ctx) => {
+    await ctx.reply(ctx.str('text') ?? '');
+  });
+
+client.command('roll', 'Roll a die')
+  .int('sides', 'How many sides')
+  .run(async (ctx) => {
+    const sides = ctx.int('sides') ?? 6;
+    await ctx.reply(`🎲 you rolled ${1 + Math.floor(Math.random() * sides)} on a d${sides}`);
+  });
+
+// Answers the invoker privately even when invoked in a group — the channel
+// sees only the acknowledgement.
+client.command('whoami', 'Send your details privately').run(async (ctx) => {
+  await ctx.replyPrivately(`You are ${ctx.senderPubkey}`);
+  if (ctx.isGroup) {
+    await ctx.reply('Sent you a DM.');
+  }
+});
+
+// Messages a user the invoker named, wherever the command was invoked from.
+client.command('tell', 'Send someone a private note')
+  .user('who', 'Who to message', true)
+  .string('note', 'What to say', true)
+  .run(async (ctx) => {
+    const who = ctx.str('who');
+    await ctx.dm(who, `${ctx.senderPubkey} says: ${ctx.str('note')}`);
+    await ctx.reply(`Delivered to ${who}`);
+  });
+
+client.command('upload', 'Send the configured file').run(async (ctx) => {
+  if (!process.env.UPLOAD_FILE_PATH) {
+    await ctx.replyPrivately('Set UPLOAD_FILE_PATH to send a file.');
+    return;
+  }
+  // Files go over DM; a group invocation still delivers to the invoker.
+  await client.sendFile(ctx.senderPubkey, process.env.UPLOAD_FILE_PATH);
+});
+
+client.on('ready', ({ pubkey, profile, commands }) => {
   const name = profile?.displayName || profile?.name || 'unknown';
-  console.log(`Logged in as ${name} (${pubkey})`);
+  console.log(`Logged in as ${name} (${pubkey}) with ${commands} command(s)`);
+});
+
+client.on('manifest_published', ({ commands, relays }) => {
+  console.log(`Interface manifest (${commands} command(s)) stored on ${relays.length} relay(s)`);
+});
+
+client.on('command', ({ name, senderPubkey }) => {
+  console.log(`/${name} invoked by ${senderPubkey}`);
+});
+
+client.on('attachment', async ({ sender, attachment }) => {
+  console.log(`Attachment from ${sender}: ${attachment.filename ?? attachment.url}`);
+});
+
+client.on('reaction', ({ sender, messageId, emoji }) => {
+  console.log(`${sender} reacted ${emoji} to ${messageId}`);
+});
+
+client.on('message_update', ({ messageId, content }) => {
+  console.log(`Message ${messageId} edited to: ${content}`);
+});
+
+client.on('message_delete', ({ messageId }) => {
+  console.log(`Message ${messageId} deleted`);
 });
 
 client.on('disconnect', ({ relay, error }) => {
@@ -165,6 +239,10 @@ client.on('message', async (senderPubkey, tags, message, self) => {
     await client.sendFile(senderPubkey, process.env.UPLOAD_FILE_PATH);
   }
 });
+
+// The `!command` handlers above are the legacy form, kept working for older
+// clients. New commands belong in the slash-command block near the top: those
+// get a picker, typed arguments and validation before anything is sent.
 
 client.connect().catch((error) => {
   console.error('Bot failed to start:', error);
