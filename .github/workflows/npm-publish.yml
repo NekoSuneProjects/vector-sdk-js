@@ -17,6 +17,10 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # Must match the "Environment name" on the package's trusted publisher
+    # exactly: npm checks that claim in the OIDC token and rejects the publish
+    # when it disagrees. GitHub creates the environment on first use.
+    environment: Node.js Package NPMJS
     permissions:
       contents: read
       # Lets the runner mint an OIDC token for npm trusted publishing. With a
