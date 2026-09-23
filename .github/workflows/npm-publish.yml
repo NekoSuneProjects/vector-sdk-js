@@ -17,6 +17,13 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Lets the runner mint an OIDC token for npm trusted publishing. With a
+      # trusted publisher configured on the package, npm verifies that token
+      # and no secret is involved at all — which also sidesteps the 2FA prompt
+      # that blocks token publishes from CI.
+      id-token: write
     steps:
       # Check out the tag the release points at, not the branch head, so the
       # published artifact is exactly what was released.
@@ -25,11 +32,15 @@ jobs:
         with:
           ref: ${{ github.event.release.tag_name || github.ref }}
 
+      # Trusted publishing needs Node >= 22.14.0 and npm >= 11.5.1.
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           registry-url: 'https://registry.npmjs.org/'
+
+      - name: Upgrade npm
+        run: npm install -g npm@latest
 
       - name: Install dependencies
         run: npm ci
@@ -37,21 +48,6 @@ jobs:
       - name: Test
         run: npm test
 
-      # An empty or missing token makes the registry answer 404 for a scoped
-      # package, which reads like "the package does not exist" rather than
-      # "you are not authenticated". Say what actually went wrong.
-      - name: Check the npm token is present
-        env:
-          NPM_TOKEN: ${{ secrets.npm_token }}
-        run: |
-          if [ -z "$NPM_TOKEN" ]; then
-            echo "::error::The npm_token secret is empty or missing. Add it under Settings > Secrets and variables > Actions. Without it npm rejects the publish with a misleading 404."
-            exit 1
-          fi
-
-      # The release tag is the source of truth for the version. A mismatch
-      # means package.json was not bumped, which would publish the wrong
-      # version — fail loudly rather than ship it.
       - name: Resolve and verify the version
         id: version
         run: |
@@ -60,6 +56,9 @@ jobs:
           echo "name=$PKG_NAME" >> "$GITHUB_OUTPUT"
           echo "version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
 
+          # The release tag is the source of truth for the version. A mismatch
+          # means package.json was not bumped, which would publish the wrong
+          # version — fail loudly rather than ship it.
           if [ "${{ github.event_name }}" = "release" ]; then
             TAG_VERSION="${{ github.event.release.tag_name }}"
             TAG_VERSION="${TAG_VERSION#v}"
@@ -80,8 +79,19 @@ jobs:
             echo "Publishing $PKG_NAME@$PKG_VERSION"
           fi
 
+      # npm prefers OIDC when a trusted publisher is configured and falls back
+      # to NODE_AUTH_TOKEN otherwise, so both routes work from this one step.
+      # The token route needs a token that does NOT prompt for 2FA: a Classic
+      # "Automation" token, or a Granular Access Token with 2FA bypass. A
+      # Classic "Publish" token asks for a one-time password and fails in CI
+      # with EOTP.
       - name: Publish to npm
         if: steps.version.outputs.already_published == 'false'
         run: npm publish --access public
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.npm_token }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Explain a 2FA failure
+        if: failure()
+        run: |
+          echo "::notice::If this failed with EOTP, the npm token requires a one-time password. CI cannot supply one. Either swap it for a Classic 'Automation' token, or configure trusted publishing for this package on npmjs.com (Settings > Trusted Publisher: repo NekoSuneProjects/vector-sdk-js, workflow npm-publish.yml) and no token is needed at all."
