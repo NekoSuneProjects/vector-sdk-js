@@ -1,13 +1,15 @@
 name: Node.js Package NPMJS
 
-# Publishing the Release Drafter draft is what ships a version. The release
-# notes are written by Release Drafter (.github/release-drafter.yml); this
-# workflow only builds, tests and publishes, and never rewrites the release
-# body.
+# Publishing a release is what ships a version. The release notes are written by
+# Release Drafter (.github/release-drafter.yml); this workflow only builds,
+# tests and publishes, and never rewrites the release body.
 on:
   release:
     types:
       - published
+  # Re-run a publish by hand after fixing a token or a failed run, without
+  # having to recreate the release.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -21,7 +23,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ github.event.release.tag_name || github.ref }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -35,20 +37,51 @@ jobs:
       - name: Test
         run: npm test
 
+      # An empty or missing token makes the registry answer 404 for a scoped
+      # package, which reads like "the package does not exist" rather than
+      # "you are not authenticated". Say what actually went wrong.
+      - name: Check the npm token is present
+        env:
+          NPM_TOKEN: ${{ secrets.npm_token }}
+        run: |
+          if [ -z "$NPM_TOKEN" ]; then
+            echo "::error::The npm_token secret is empty or missing. Add it under Settings > Secrets and variables > Actions. Without it npm rejects the publish with a misleading 404."
+            exit 1
+          fi
+
       # The release tag is the source of truth for the version. A mismatch
       # means package.json was not bumped, which would publish the wrong
       # version — fail loudly rather than ship it.
-      - name: Verify package.json matches the release tag
+      - name: Resolve and verify the version
+        id: version
         run: |
+          PKG_NAME=$(node -p "require('./package.json').name")
           PKG_VERSION=$(node -p "require('./package.json').version")
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
-          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
-            echo "::error::package.json is $PKG_VERSION but the release tag is $TAG_VERSION. Bump package.json and re-run."
-            exit 1
+          echo "name=$PKG_NAME" >> "$GITHUB_OUTPUT"
+          echo "version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
+
+          if [ "${{ github.event_name }}" = "release" ]; then
+            TAG_VERSION="${{ github.event.release.tag_name }}"
+            TAG_VERSION="${TAG_VERSION#v}"
+            if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+              echo "::error::package.json is $PKG_VERSION but the release tag is $TAG_VERSION. Bump package.json and re-run."
+              exit 1
+            fi
           fi
-          echo "Publishing $PKG_VERSION"
+
+          # Republishing an existing version is refused by the registry, so a
+          # re-run of an already-shipped version should be a no-op, not a
+          # failure.
+          if npm view "$PKG_NAME@$PKG_VERSION" version >/dev/null 2>&1; then
+            echo "already_published=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::$PKG_NAME@$PKG_VERSION is already on npm — nothing to publish."
+          else
+            echo "already_published=false" >> "$GITHUB_OUTPUT"
+            echo "Publishing $PKG_NAME@$PKG_VERSION"
+          fi
 
       - name: Publish to npm
+        if: steps.version.outputs.already_published == 'false'
         run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.npm_token }}
