@@ -17,17 +17,72 @@ permissions:
   contents: read
 
 jobs:
+  # Build and test the code that would be released. A version is only published
+  # if this passes, so a broken build never becomes a release.
+  build:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      is_new: ${{ steps.version.outputs.is_new }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Runs the build and the bot-interface parity suite.
+      - name: Test
+        run: npm test
+
+      # package.json is the source of truth for the version, so the release is
+      # named from it rather than from Release Drafter's own tag arithmetic.
+      # That keeps the tag and package.json in agreement, which is what the
+      # publish workflow checks before it ships anything to npm.
+      - name: Resolve version
+        id: version
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            echo "is_new=false" >> "$GITHUB_OUTPUT"
+            echo "v$VERSION is already released — the draft stays a draft."
+          else
+            echo "is_new=true" >> "$GITHUB_OUTPUT"
+            echo "v$VERSION is new — the draft will be published."
+          fi
+
   update_release_draft:
+    needs: build
+    # The PR path skips `build` entirely and only needs the autolabeler, so run
+    # whenever the build succeeded or was never applicable.
+    if: always() && (needs.build.result == 'success' || needs.build.result == 'skipped')
     permissions:
-      # Write the draft release.
+      # Write the release and its tag.
       contents: write
       # Apply autolabeler labels.
       pull-requests: write
     runs-on: ubuntu-latest
     steps:
-      - name: Update release draft
+      - name: Draft or publish the release
         uses: release-drafter/release-drafter@v6
         with:
           config-name: release-drafter.yml
+          # Empty on the PR path, where release-drafter falls back to its own
+          # resolver and only the autolabeler matters.
+          version: ${{ needs.build.outputs.version }}
+          # Publish for real once the build is green and this version has not
+          # been released before. Re-pushing to main without a version bump
+          # just refreshes the draft, so it cannot publish the same version
+          # twice or trip the publish workflow's duplicate guard.
+          publish: ${{ github.event_name == 'push' && needs.build.outputs.is_new == 'true' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
