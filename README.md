@@ -1,92 +1,240 @@
-﻿# Vector Bot SDK (Node.js)
+# Vector Bot SDK (Node.js)
 
-A JavaScript/TypeScript port of the Vector Bot SDK that mirrors the structure of the original Rust crate while staying idiomatic for the Node.js ecosystem. It provides helpers for creating Vector bots, sending encrypted private messages and files, building metadata, subscribing to gift-wrap events, and uploading data through a NIP-96 server.
+A JavaScript/TypeScript implementation of the Vector Bot SDK. It tracks the wire
+format of VectorApp's Rust SDK (`crates/vector-sdk`) and the `vector-core`
+engine underneath it, while staying idiomatic for Node.
 
 ## Highlights
 
-- `VectorBot` and `Channel` classes that wrap a Nostr client for message, reaction, typing, and file flows.
-- Metadata builders, filters, and utilities ported from the Rust implementation.
-- AES-256-GCM file encryption helpers and attachment helpers with extension inference.
-- Upload helpers that target the trusted NIP-96 server used by Vector and emit progress callbacks.
+- **Slash commands** with typed arguments, published as a Bot Interface Manifest
+  (kind 10304) so every Vector client renders a `/` picker for your bot.
+- `VectorBotClient`, `VectorBot` and `Channel` for messages, replies, edits,
+  deletions, reactions, typing indicators and files.
+- **NIP-17 delivery**: gift wraps go to the recipient's published inbox relays
+  (kind 10050), not just your own, and the bot publishes its own list on connect.
+- Self-wrapping, so the account's other devices see what the bot sent.
+- NIP-40 self-destruct, NIP-30 custom emoji, threaded replies.
+- Attachment send *and* receive, with AES-256-GCM decryption.
+- Partial relay failures don't fail a send when at least one relay accepts it.
+- Legacy Vector MLS group support through an `mlsAdapter` sidecar bridge.
 
-## Getting Started
+## Install
 
 ```bash
 npm install @nekosuneprojects/vector-sdk
 ```
 
-Then import the pieces you need:
+## Getting started
 
 ```ts
 import { VectorBotClient } from '@nekosuneprojects/vector-sdk';
 
 const client = new VectorBotClient({
-  privateKey: process.env.NOSTR_PRIVATE_KEY,
-  relays: (process.env.NOSTR_RELAYS ?? 'wss://jskitty.cat/nostr')
+  privateKey: process.env.NOSTR_PRIVATE_KEY!,
+  relays: (process.env.NOSTR_RELAYS ?? 'wss://jskitty.cat/nostr,wss://relay.damus.io')
     .split(',')
     .map((relay) => relay.trim())
     .filter(Boolean),
-  debug: process.env.DEBUG === '1',
-  reconnect: true,
-  reconnectIntervalMs: 15000,
   profile: {
     name: 'testnekobot',
     displayName: 'NekoSune TestBOT',
     about: 'Vector bot created with the SDK',
-    picture: 'https://example.com/avatar.png',
-    banner: 'https://example.com/banner.png',
   },
+  debug: process.env.DEBUG === '1',
 });
 
-client.on('ready', ({ pubkey, profile }) => {
-  const name = profile?.displayName || profile?.name || 'unknown';
-  console.log(`Logged in as ${name} (${pubkey})`);
-});
-
-client.on('disconnect', ({ relay, error }) => {
-  const reason = error instanceof Error ? error.message : String(error ?? '');
-  console.warn(`Disconnected from ${relay}${reason ? `: ${reason}` : ''}`);
-});
-
-client.on('reconnect', ({ relay }) => {
-  console.log(`Reconnected to ${relay}`);
-});
-
-client.on('error', (error) => {
-  console.error('Bot error:', error);
+client.on('ready', ({ pubkey, commands }) => {
+  console.log(`Online as ${pubkey} with ${commands} command(s)`);
 });
 
 client.on('message', async (senderPubkey, tags, message, self) => {
   if (self) return;
+  await client.replyTo(senderPubkey, tags.messageId!, `You said: ${message}`);
+});
 
-  const senderName = tags.displayName || senderPubkey;
-  console.log(`${senderName}: ${message}`);
+await client.connect();
+```
 
-  if (message.startsWith('!ping')) {
-    await client.sendMessage(senderPubkey, 'pong');
-    return;
-  }
+## Slash commands
 
-  if (message.startsWith('!upload')) {
-    if (!process.env.UPLOAD_FILE_PATH) {
-      await client.sendMessage(senderPubkey, 'Set UPLOAD_FILE_PATH to send a file.');
-      return;
+Declare a command with typed arguments and the manifest publishes when the
+client connects. Vector clients then render a `/` picker with a field per
+argument — a dropdown for a choice, a member picker for a user, a number field
+for an int — and validate the input *before* it is sent. Your handler receives
+the arguments already parsed and type-checked.
+
+```ts
+client.command('weather', 'Current conditions for a city')
+  .string('city', 'Which city', true)                   // required free text
+  .choice('units', 'Temperature units', ['c', 'f'])     // optional dropdown
+  .run(async (ctx) => {
+    const city = ctx.str('city') ?? '';
+    const units = ctx.str('units') ?? 'c';
+    await ctx.reply(`Weather in ${city} (°${units.toUpperCase()})…`);
+  });
+```
+
+Argument types: `.string()`, `.int()`, `.number()`, `.flag()` (bool), `.user()`
+(an npub) and `.choice(name, description, options, required)`. Read them off the
+context with `ctx.str/int/number/flag(name)`.
+
+A trailing `.string()` swallows the rest of the line, so `/say hello there` is
+one value. Quoting groups words anywhere: `/announce "Big news" "Meeting at 5pm"`.
+
+A matched command runs its handler and is **consumed** — it never reaches the
+`message` event, so commands and free-form chat live side by side without your
+handler re-parsing text. An invocation that matches a command *name* but fails
+typing gets the canonical two-line error (`{arg}: {reason}` then `usage: …`) and
+is still consumed.
+
+### Answering in a group, or privately
+
+Commands work in groups as well as DMs. The context gives you the choice of
+where the answer lands:
+
+| Method | Where the answer goes |
+| --- | --- |
+| `ctx.reply(text)` | Where the command was invoked — the group if it came from a group, the DM if it came from a DM. |
+| `ctx.replyPrivately(text)` | The invoker's DM, **even when the command was invoked in a group**. The group sees nothing. |
+| `ctx.dm(user, text)` | Any user, by npub or hex pubkey. |
+
+`ctx.isGroup` and `ctx.groupId` tell you where you are.
+
+```ts
+client.command('balance', 'Check your balance')
+  .run(async (ctx) => {
+    // In a channel this stays between the bot and whoever asked.
+    await ctx.replyPrivately(`Your balance is ${await lookup(ctx.senderPubkey)}`);
+    if (ctx.isGroup) {
+      await ctx.reply('Sent you a DM.');
     }
-    await client.sendFile(senderPubkey, process.env.UPLOAD_FILE_PATH);
-  }
-});
+  });
 
-client.connect().catch((error) => {
-  console.error('Bot failed to start:', error);
-  process.exit(1);
-});
+client.command('gift', 'Send someone a gift')
+  .user('who', 'Who to gift', true)
+  .int('amount', 'How much', true)
+  .run(async (ctx) => {
+    const who = ctx.str('who')!;          // normalized to a bare npub
+    await ctx.dm(who, `You were gifted ${ctx.int('amount')} by ${ctx.senderPubkey}`);
+    await ctx.reply(`Gift sent to ${who}`);
+  });
+```
 
-process.on('SIGINT', () => {
-  client.close();
-  process.exit(0);
+Group replies go through the configured group transport, so a group-answering
+command needs `mlsAdapter` set (see below). `ctx.replyPrivately` and `ctx.dm`
+are plain DMs and need nothing extra.
+
+### Addressing
+
+A client may tag an invocation for specific bots with `["bot", <hex>]`. Tagged
+means only those bots execute, so two bots can share a command name; untagged is
+broadcast, so the tag is never required. Incoming messages expose it as
+`tags.addressedBots`.
+
+## Messaging
+
+Every send returns `{ id, sent }`. The `id` is the message id that replies,
+edits, reactions and deletions reference.
+
+```ts
+const { id } = await client.send(pubkey, 'hello');
+
+await client.replyTo(pubkey, id, 'a threaded reply');
+await client.editMessage(pubkey, id, 'hello (edited)');
+await client.react(pubkey, id, '👍');
+await client.react(pubkey, id, ':party:', { emojiUrl: 'https://…/party.png' });
+await client.typing(pubkey);
+await client.deleteMessage(pubkey, id);
+
+// Self-destructing message: a Unix timestamp in seconds.
+await client.send(pubkey, 'gone in an hour', {
+  expiration: Math.floor(Date.now() / 1000) + 3600,
 });
 ```
 
-## Building
+## Files
 
-The package is authored in TypeScript. Run `npm run build` to emit the `dist/` artifacts used by consumers.
+```ts
+await client.sendFile(pubkey, '/path/to/photo.jpg');
+
+client.on('attachment', async ({ sender, attachment }) => {
+  await client.saveAttachment(attachment, `./downloads/${attachment.filename ?? 'file'}`);
+});
+```
+
+Attachments are encrypted with AES-256-GCM, uploaded to Vector's NIP-96 server,
+and sent as a gift-wrapped kind 15 rumor. Received attachments also arrive on the
+`message` event as `tags.attachment`.
+
+## Events
+
+| Event | Fires when |
+| --- | --- |
+| `ready` | Connected. Reports `pubkey`, `profile`, `commands`, `knownGroupIds`. |
+| `message` | A message arrived: `(senderPubkey, tags, content, self)`. |
+| `command` | A registered command matched. |
+| `attachment` | A file attachment arrived. |
+| `message_update` | An edit landed. |
+| `reaction` | A reaction landed. |
+| `message_delete` | A deletion request landed. |
+| `typing` | A typing indicator arrived. |
+| `manifest_published` | The command manifest went out. |
+| `disconnect` / `reconnect` / `error` | Relay lifecycle. |
+| `group_discovered` / `group_wrapper` / `mls_welcome` | Legacy MLS group path. |
+
+## Options
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `useInboxRelays` | `true` | Deliver gift wraps to the recipient's kind-10050 inbox relays. |
+| `selfWrap` | `true` | Also wrap each send to the bot itself, for multi-device visibility. |
+| `legacyNip04` | `false` | Also send DMs as NIP-04 (kind 4). Vector ignores kind 4. |
+| `publishManifest` | `true` | Publish the command manifest on connect. |
+| `discoveryRelays` | `purplepag.es`, `relay.nostr.band`, `nos.lol` | Extra relays for manifest and inbox-list discovery. |
+| `reconnect` / `reconnectIntervalMs` | `true` / `15000` | Relay reconnection. |
+
+## Vector private groups
+
+Group support here is the legacy Vector MLS path (kinds 443/444). Set
+`MLS_SIDECAR_BIN` to the compiled Rust sidecar (`RUST/mls-sidecar`) and pass an
+adapter so group wrappers can be decrypted and group replies sent:
+
+```ts
+import { createMlsSidecarAdapter } from '@nekosuneprojects/vector-sdk';
+
+const mlsAdapter = createMlsSidecarAdapter({
+  binPath: process.env.MLS_SIDECAR_BIN!,
+  stateDir: process.env.MLS_STATE_DIR ?? '.vector-mls-sidecar',
+});
+
+const client = new VectorBotClient({
+  privateKey,
+  relays,
+  mlsAdapter,
+  vectorOnly: true,
+  autoDiscoverGroups: true,
+  discoverGroupsFromHistory: true,
+});
+```
+
+VectorApp has since moved communities to the **Concord v2** protocol (kinds
+3300-3311), whose encrypted envelopes, epoch keys and consensus folding live in
+`vector-core` and are not implemented in this package. The v2 kind constants are
+exported from `kinds` so you can recognise that traffic:
+
+```ts
+import { kinds } from '@nekosuneprojects/vector-sdk';
+
+kinds.isCommunityKind(event.kind); // true for 3300-3311
+```
+
+## Building and testing
+
+```bash
+npm run build   # emit dist/
+npm test        # build, then run the bot-interface parity suite
+```
+
+The parity suite runs the `vector_core::bot_interface` test vectors against this
+package's port of the manifest parser, validator and error strings, so a command
+typed in Vector resolves to the same arguments here as it would in the Rust SDK.

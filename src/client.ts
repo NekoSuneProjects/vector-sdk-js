@@ -3,10 +3,36 @@ import { finalizeEvent, getPublicKey } from 'nostr-tools/pure';
 import WebSocket from 'ws';
 import type { Metadata } from './metadata.js';
 import { normalizePrivateKey } from './keys.js';
+import { buildInboxRelayList, InboxRelayResolver } from './inbox-relays.js';
+import { DISCOVERY_RELAYS } from './bot-interface.js';
 
 export interface ClientConfig {
   proxy?: string;
   defaultRelays?: string[];
+  publishRetries?: number;
+  /**
+   * Also send DMs as NIP-04 (kind 4) alongside the gift wrap.
+   *
+   * Vector dropped NIP-04 entirely and ignores kind 4, so this is off by
+   * default. Turn it on only to reach a client that still speaks it.
+   */
+  legacyNip04?: boolean;
+  /**
+   * Send every outgoing message a second time, gift-wrapped to the bot itself,
+   * so the account's other devices see what this one sent. Matches Vector. On
+   * by default.
+   */
+  selfWrap?: boolean;
+  /**
+   * Deliver gift wraps to the recipient's published NIP-17 inbox relays
+   * (kind 10050) rather than only the bot's own relay set. On by default.
+   */
+  useInboxRelays?: boolean;
+  /**
+   * Relays queried for inbox lists and bot manifests, on top of the bot's own.
+   * Defaults to {@link DISCOVERY_RELAYS}.
+   */
+  discoveryRelays?: string[];
 }
 
 const DEFAULT_RELAYS = [
@@ -25,9 +51,15 @@ function ensureWebSocket(): void {
 export class VectorClient {
   public readonly pool = new SimplePool();
   public readonly relays: string[];
+  public readonly discoveryRelays: string[];
   public readonly publicKey: string;
   public readonly privateKey: string;
   public readonly privateKeyBytes: Uint8Array;
+  public readonly legacyNip04: boolean;
+  public readonly selfWrap: boolean;
+  public readonly useInboxRelays: boolean;
+  public readonly inboxRelays: InboxRelayResolver;
+  private readonly publishRetries: number;
 
   constructor(keys: string, config?: ClientConfig) {
     ensureWebSocket();
@@ -35,7 +67,23 @@ export class VectorClient {
     this.privateKey = normalized.hex;
     this.privateKeyBytes = normalized.bytes;
     this.publicKey = getPublicKey(this.privateKeyBytes);
-    this.relays = config?.defaultRelays ?? DEFAULT_RELAYS;
+    this.relays = (config?.defaultRelays ?? DEFAULT_RELAYS)
+      .map((relay) => relay.trim())
+      .filter(Boolean);
+    this.discoveryRelays = (config?.discoveryRelays ?? [...DISCOVERY_RELAYS])
+      .map((relay) => relay.trim())
+      .filter(Boolean);
+    this.publishRetries = Math.max(0, config?.publishRetries ?? 1);
+    this.legacyNip04 = config?.legacyNip04 === true;
+    this.selfWrap = config?.selfWrap !== false;
+    this.useInboxRelays = config?.useInboxRelays !== false;
+
+    // Inbox lists are replaceable events, so the discovery indexers are the
+    // reliable place to find one even when a recipient's own relay is down.
+    this.inboxRelays = new InboxRelayResolver(
+      this.pool,
+      Array.from(new Set([...this.relays, ...this.discoveryRelays])),
+    );
   }
 
   public async setMetadata(metadata: Metadata): Promise<void> {
@@ -49,20 +97,73 @@ export class VectorClient {
       this.privateKeyBytes,
     );
 
-    await this.publish(event, this.relays);
+    await this.publish(event, this.relays, this.publishRetries);
+  }
+
+  /**
+   * Publish this bot's own NIP-17 inbox relay list, so other clients know where
+   * to deliver its gift wraps instead of guessing.
+   */
+  public async publishInboxRelayList(relays?: string[]): Promise<void> {
+    const event = buildInboxRelayList(relays ?? this.relays, this.privateKeyBytes);
+    await this.publish(
+      event,
+      Array.from(new Set([...this.relays, ...this.discoveryRelays])),
+      this.publishRetries,
+    );
   }
 
   public async publishEvent(event: Event, relays?: string[]): Promise<void> {
-    return this.publish(event, relays ?? this.relays);
+    return this.publish(event, relays ?? this.relays, this.publishRetries);
   }
 
-  private async publish(event: Event, relays: string[]): Promise<void> {
-    const results = await Promise.allSettled(this.pool.publish(relays, event));
-    const rejected = results.find((result) => result.status === 'rejected');
-    if (rejected && rejected.status === 'rejected') {
-      const reason = rejected.reason instanceof Error ? rejected.reason : new Error(String(rejected.reason));
-      throw reason;
+  /**
+   * Publish a gift wrap to where `recipientPubkey` actually looks for it.
+   *
+   * The recipient's inbox relays are used when it publishes a kind 10050 and
+   * {@link useInboxRelays} is on; otherwise this falls back to the bot's own
+   * relays, which is also where the send lands if the lookup finds nothing.
+   */
+  public async publishGiftWrap(event: Event, recipientPubkey: string): Promise<void> {
+    if (!this.useInboxRelays) {
+      return this.publishEvent(event);
     }
+
+    let targets = this.relays;
+    try {
+      targets = await this.inboxRelays.targetsFor(recipientPubkey, this.relays);
+    } catch {
+      // A lookup failure is never a send failure — fall back to our own relays.
+    }
+    return this.publish(event, targets, this.publishRetries);
+  }
+
+  private async publish(event: Event, relays: string[], retries = 0): Promise<void> {
+    if (!relays.length) {
+      throw new Error('At least one relay is required');
+    }
+
+    await Promise.allSettled(relays.map((relay) => this.pool.ensureRelay(relay)));
+    const results = await Promise.allSettled(this.pool.publish(relays, event));
+    const fulfilled = results.filter((result) => result.status === 'fulfilled');
+
+    if (fulfilled.length > 0) {
+      return;
+    }
+
+    const firstRejected = results.find((result) => result.status === 'rejected');
+    const reason =
+      firstRejected && firstRejected.status === 'rejected'
+        ? firstRejected.reason
+        : new Error('Failed to publish to relays');
+    const error = reason instanceof Error ? reason : new Error(String(reason));
+
+    if (retries > 0) {
+      await this.publish(event, relays, retries - 1);
+      return;
+    }
+
+    throw error;
   }
 }
 
