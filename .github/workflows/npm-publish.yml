@@ -1,25 +1,28 @@
 name: Node.js Package NPMJS
 
+# Publishing the Release Drafter draft is what ships a version. The release
+# notes are written by Release Drafter (.github/release-drafter.yml); this
+# workflow only builds, tests and publishes, and never rewrites the release
+# body.
 on:
   release:
-    types: 
+    types:
       - published
 
 permissions:
-  contents: write
-  issues: write
-  pull-requests: write
-  packages: write
+  contents: read
 
 jobs:
-  release:
+  publish:
     runs-on: ubuntu-latest
     steps:
-      # Checkout project repository
+      # Check out the tag the release points at, not the branch head, so the
+      # published artifact is exactly what was released.
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
 
-      # Setup Node.js environment
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -29,56 +32,23 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build package
-        run: npm run build
+      - name: Test
+        run: npm test
 
-      # Configure Git
-      - name: Configure Git
+      # The release tag is the source of truth for the version. A mismatch
+      # means package.json was not bumped, which would publish the wrong
+      # version — fail loudly rather than ship it.
+      - name: Verify package.json matches the release tag
         run: |
-          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git config --global user.name "GitHub Actions"
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::package.json is $PKG_VERSION but the release tag is $TAG_VERSION. Bump package.json and re-run."
+            exit 1
+          fi
+          echo "Publishing $PKG_VERSION"
 
-      # Read current package version
-      - name: Read version from package.json
-        id: read_version
-        run: |
-          VERSION=$(node -p "require('./package.json').version")
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
-
-      # Update changelog unreleased section with current version
-      - name: Update changelog
-        uses: superfaceai/release-changelog-action@v1
-        with:
-          path-to-changelog: CHANGELOG.md
-          version: ${{ env.VERSION }}
-          operation: release
-
-      # Commit and tag
-      - name: Commit
-        run: |
-          git add package.json CHANGELOG.md
-          git commit -m "chore: release ${{ env.VERSION }}"
-
-      # Publish version to npm
       - name: Publish to npm
         run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.npm_token }}
-
-      # Read version changelog
-      - id: get_changelog
-        name: Get version changelog
-        uses: superfaceai/release-changelog-action@v1
-        with:
-          path-to-changelog: CHANGELOG.md
-          version: ${{ env.VERSION }}
-          operation: read
-
-      # Update GitHub release
-      - name: Create or update GitHub Release
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: v${{ env.VERSION }}
-          body: ${{ steps.get_changelog.outputs.changelog }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

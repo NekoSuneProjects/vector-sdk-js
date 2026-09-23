@@ -1,0 +1,33 @@
+name: Release Drafter
+
+on:
+  push:
+    branches:
+      - main
+  # Needed by the autolabeler. `pull_request_target` runs the workflow from the
+  # BASE branch, so a fork's PR cannot alter what runs here while still getting
+  # labelled.
+  pull_request_target:
+    types:
+      - opened
+      - reopened
+      - synchronize
+
+permissions:
+  contents: read
+
+jobs:
+  update_release_draft:
+    permissions:
+      # Write the draft release.
+      contents: write
+      # Apply autolabeler labels.
+      pull-requests: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update release draft
+        uses: release-drafter/release-drafter@v6
+        with:
+          config-name: release-drafter.yml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

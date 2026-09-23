@@ -5,7 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+Releases are drafted by [Release Drafter](.github/release-drafter.yml) from
+merged pull requests; this file is the curated, hand-written record of what
+changed in each version.
+
 ## [Unreleased]
+
+## [1.1.0] - 2026-09-23
+
+Catches the package up with VectorApp, whose Rust SDK was rewritten as
+`crates/vector-sdk` 0.9.0 on top of `vector-core`. Several things the package
+sent were no longer what Vector reads.
 
 ### Fixed
 
@@ -65,6 +75,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tags.messageId` and `tags.replyTo`.
 - Event kind constants (the `kinds` export), including the Concord v2 community
   block (3300-3311) for identification and filtering.
+- A test suite (`npm test`) running the `vector_core::bot_interface` vectors
+  against this package's port.
 
 ### Changed
 
@@ -77,6 +89,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   existing MLS sidecar path (kinds 443/444, via `mlsAdapter`) is unchanged and
   still works, and the v2 kind constants are exported so consumers can recognise
   the traffic.
+- Release notes are now drafted by Release Drafter, and the publish workflows
+  build, test and publish without rewriting the release body.
 
 ### Deprecated
 
@@ -84,4 +98,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `sendPrivateFile` still work and still return booleans, but are superseded by
   `send`, `react`, `typing` and `sendFile`, which return the message id.
 
-[unreleased]: https://github.com/NekoSuneProjects/vector-sdk-js/compare/v1.0.5...HEAD
+## [1.0.5] - 2026-02-14
+
+Never tagged or published; superseded by 1.1.0.
+
+### Added
+
+- MLS sidecar adapter (`createMlsSidecarAdapter`) bridging the client to the
+  Rust sidecar for Vector private groups: key-package publishing, welcome sync
+  and processing, group-wrapper decryption and group sends.
+- Group discovery from gift-wrap and wrapper history at startup, with
+  `group_discovered`, `group_bootstrap_complete` and MLS diagnostic events.
+
+### Changed
+
+- Shipped the built `dist/` output in the repository.
+
+## [1.0.4] - 2026-02-13
+
+### Added
+
+- `vectorOnly` mode matching VectorApp's relay filters, group command routing
+  (`tags.botInGroup`, `tags.directedToBot`) and relay reconnection with
+  `disconnect` / `reconnect` events.
+
+### Fixed
+
+- Key handling and normalization in `keys.ts`; attachment and client fixes.
+
+## [1.0.3] - 2026-02-13
+
+### Fixed
+
+- Build failure in the publish workflows.
+
+## [1.0.2] - 2026-01-20
+
+### Changed
+
+- Package version and documented dependency usage.
+
+## [1.0.1] - 2026-01-20
+
+### Changed
+
+- Package version and README dependency references.
+
+## [1.0.0] - 2026-01-20
+
+### Added
+
+- First stable release: project metadata, npm and GitHub Packages publish
+  workflows, and this changelog.
+
+## [0.2.1] - 2026-01-20
+
+### Added
+
+- Initial working SDK: Nostr client, key normalization, gift-wrap subscription,
+  metadata builders, AES-256-GCM file encryption, NIP-96 upload, and the
+  `VectorBotClient` / `VectorBot` / `Channel` surface, with a demo script.
+
+[unreleased]: https://github.com/NekoSuneProjects/vector-sdk-js/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/NekoSuneProjects/vector-sdk-js/compare/v1.0.4...v1.1.0
+[1.0.5]: https://github.com/NekoSuneProjects/vector-sdk-js/compare/v1.0.4...v1.0.5
+[1.0.4]: https://github.com/NekoSuneProjects/vector-sdk-js/compare/v1.0.3...v1.0.4
+[1.0.3]: https://github.com/NekoSuneProjects/vector-sdk-js/compare/v1.0.2...v1.0.3
+[1.0.2]: https://github.com/NekoSuneProjects/vector-sdk-js/compare/v1.0.1...v1.0.2
+[1.0.1]: https://github.com/NekoSuneProjects/vector-sdk-js/compare/v1.0.0...v1.0.1
+[1.0.0]: https://github.com/NekoSuneProjects/vector-sdk-js/releases/tag/v1.0.0
