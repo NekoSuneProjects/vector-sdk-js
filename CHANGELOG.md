@@ -11,6 +11,32 @@ changed in each version.
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-09-23
+
+Release plumbing only. No changes to the SDK itself.
+
+### Fixed
+
+- The publish job declared no GitHub Actions environment, so the OIDC token
+  could not match the `Node.js Package NPMJS` environment recorded on the
+  package's npm trusted publisher, and a trusted publish would have been
+  rejected.
+
+### Changed
+
+- npm publishes through trusted publishing (OIDC) rather than a long-lived
+  token. npm falls back to `NODE_AUTH_TOKEN` if OIDC is unavailable, so both
+  routes work. Publishing with a token that requires two-factor authentication
+  fails in CI with `EOTP`, which no automated run can answer; OIDC sidesteps it
+  and, per npm's July 2026 notice, is the route that survives the January 2027
+  restriction on 2FA-bypass tokens.
+- The publish runner moved to Node 22 and upgrades npm, meeting the Node
+  >= 22.14 and npm >= 11.5.1 floors trusted publishing requires.
+- Both publish workflows check the registry first and skip a version already
+  published, so a re-run is a no-op rather than a 409, and both accept
+  `workflow_dispatch` so a failed publish can be retried without recreating the
+  release.
+
 ## [1.1.0] - 2026-09-23
 
 Catches the package up with VectorApp, whose Rust SDK was rewritten as
@@ -159,7 +185,8 @@ Never tagged or published; superseded by 1.1.0.
   metadata builders, AES-256-GCM file encryption, NIP-96 upload, and the
   `VectorBotClient` / `VectorBot` / `Channel` surface, with a demo script.
 
-[unreleased]: https://github.com/NekoSuneProjects/vector-sdk-js/compare/v1.1.0...HEAD
+[unreleased]: https://github.com/NekoSuneProjects/vector-sdk-js/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/NekoSuneProjects/vector-sdk-js/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/NekoSuneProjects/vector-sdk-js/compare/v1.0.4...v1.1.0
 [1.0.5]: https://github.com/NekoSuneProjects/vector-sdk-js/compare/v1.0.4...v1.0.5
 [1.0.4]: https://github.com/NekoSuneProjects/vector-sdk-js/compare/v1.0.3...v1.0.4
