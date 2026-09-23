@@ -1,0 +1,303 @@
+===============================================================================
+ RELEASING @nekosuneprojects/vector-sdk  --  RUNBOOK / TROUBLESHOOTING
+ Repo:    https://github.com/NekoSuneProjects/vector-sdk-js
+ Package: https://www.npmjs.com/package/@nekosuneprojects/vector-sdk
+ Last verified: 2026-09-23 (1.1.1 published from CI over OIDC)
+===============================================================================
+
+
+-------------------------------------------------------------------------------
+ 1. HOW TO CUT A RELEASE  (the short version)
+-------------------------------------------------------------------------------
+
+  1. On branch `dev`:
+       npm version 1.2.3 --no-git-tag-version
+       (edit CHANGELOG.md: add "## [1.2.3] - YYYY-MM-DD" under [Unreleased],
+        and add the link line at the bottom of the file)
+       npm test
+       git add -A && git commit -m "chore: release 1.2.3" && git push origin dev
+
+  2. Open a PR dev -> main, and MERGE IT IN THE GITHUB WEB UI.
+     (See pitfall #8 - merging from the CLI does not trigger the workflows.)
+
+  3. That is all. The merge fires:
+       Release Drafter -> builds + tests -> publishes release vX.Y.Z
+         -> "Node.js Package NPMJS"          -> publishes to npmjs.com
+         -> "Node.js Package GitHub Mode"    -> publishes to GitHub Packages
+
+  4. npm takes ~90 seconds to make the version visible after it is accepted.
+     Do not panic if `npm view` still shows the old version. See pitfall #6.
+
+  Manual retry if a publish step failed:
+       Actions -> "Node.js Package NPMJS" -> Run workflow -> main
+
+
+-------------------------------------------------------------------------------
+ 2. HOW THE PIECES FIT TOGETHER
+-------------------------------------------------------------------------------
+
+  package.json version      THE source of truth. Everything is named from it.
+
+  .github/release-drafter.yml
+      Config only. Categorises merged PRs by label into the release notes.
+      Labels it sorts on: feature, bug, maintenance, documentation,
+      dependencies. The autolabeler applies these from branch names and
+      conventional-commit titles (feat:, fix:, chore: ...).
+
+  .github/workflows/release-drafter.yml
+      Runs on push to main. Builds + tests first, then PUBLISHES the release
+      (not just a draft) when package.json holds a version with no release yet.
+      Push to main without bumping the version = draft is refreshed only.
+
+  .github/workflows/npm-publish.yml
+      Runs when a release is published. Publishes to npmjs.com.
+      Uses TRUSTED PUBLISHING (OIDC) - no token needed.
+      Falls back to NODE_AUTH_TOKEN if OIDC is unavailable.
+
+  .github/workflows/npm-publish-github-packages.yml
+      Same trigger, publishes to GitHub Packages using GITHUB_TOKEN.
+
+  CHANGELOG.md
+      Hand-written record. Must stay valid Keep a Changelog format.
+
+
+-------------------------------------------------------------------------------
+ 3. THE CREDENTIAL SETUP  (what is configured, and where)
+-------------------------------------------------------------------------------
+
+  TRUSTED PUBLISHER  (this is what actually publishes to npm)
+    Where: npmjs.com -> the package -> Settings -> Trusted Publisher
+    Publisher .......... GitHub Actions
+    Organization/user .. NekoSuneProjects
+    Repository ......... vector-sdk-js
+    Workflow filename .. npm-publish.yml
+    Environment name ... Node.js Package NPMJS
+    Allowed actions .... "Allow npm publish" is CHECKED
+
+    >> The Environment name MUST match `environment:` on the publish job in
+       npm-publish.yml, character for character. If you change one, change the
+       other, or every publish is rejected.
+
+    >> If you rename the workflow FILE, update "Workflow filename" too.
+
+  NPM_TOKEN  (organisation secret, fallback only)
+    Where: GitHub org NekoSuneProjects -> Settings -> Secrets -> Actions
+    It is NOT a repository secret - it will not show under the repo's own
+    secret list even though workflows can read it. Secret names are
+    case-insensitive in Actions, so `secrets.NPM_TOKEN` and
+    `secrets.npm_token` are the same thing.
+
+    Once OIDC is confirmed working you can delete this secret entirely.
+
+
+-------------------------------------------------------------------------------
+ 4. EVERY ERROR WE HIT, AND WHAT IT ACTUALLY MEANT
+-------------------------------------------------------------------------------
+
+ ..............................................................................
+ #1   npm error code E404
+      404 Not Found - PUT https://registry.npmjs.org/@nekosuneprojects%2f...
+      "'@nekosuneprojects/vector-sdk@1.1.0' is not in this registry"
+ ..............................................................................
+   MEANS:   Not authenticated. For a SCOPED package npm answers an
+            unauthenticated write with 404, not 401. The message is a lie -
+            the package exists.
+   CAUSE:   The token was empty, missing, or expired.
+   FIX:     Check the org secret NPM_TOKEN exists and has not expired.
+            Better: use trusted publishing and no token at all.
+   NOTE:    Do not waste time checking whether the package name is right.
+            A 404 on PUT is an auth problem 99% of the time.
+
+ ..............................................................................
+ #2   npm error code EOTP
+      "This operation requires a one-time password"
+ ..............................................................................
+   MEANS:   The token IS valid and authenticated - progress! - but npm wants
+            2FA, and no CI run can type a one-time password.
+   CAUSE:   The token is a Classic "Publish" token, or a Granular Access Token
+            without 2FA bypass. Also driven by the package's Publishing access
+            setting on npmjs.com.
+   FIX:     Use trusted publishing (OIDC). It has no 2FA prompt at all.
+            Stop-gap only: a Classic "AUTOMATION" token, which skips 2FA.
+            Do not bother - per npm's July 2026 notice, tokens that bypass 2FA
+            lose the ability to publish around January 2027.
+   GOING FROM E404 TO EOTP IS PROGRESS. It means auth started working.
+
+ ..............................................................................
+ #3   npm error code E409
+      "Cannot publish over existing version"
+ ..............................................................................
+   MEANS:   That exact version is already on that registry. Not a failure.
+   CAUSE:   A re-run, or the other registry already got it.
+   FIX:     Nothing. Both workflows now check the registry first and skip a
+            version already published, so this should no longer surface.
+            A version can never be republished - bump and ship a new one.
+
+ ..............................................................................
+ #4   Error: Unable to parse changelog.
+      Parser error: Parse error in the line 9: Syntax error in the release title
+ ..............................................................................
+   MEANS:   CHANGELOG.md is not valid Keep a Changelog.
+   CAUSES:  - A release heading like "## 1.1.0" instead of "## [1.1.0] - DATE"
+            - A section heading that is not one of the six allowed types:
+              Added, Changed, Deprecated, Removed, Fixed, Security
+            - A missing "## [Unreleased]" section
+   FIX:     Validate locally before pushing:
+              npm i keep-a-changelog
+              node -e "const{parser}=require('keep-a-changelog');\
+              parser(require('fs').readFileSync('CHANGELOG.md','utf8'));\
+              console.log('ok')"
+   NOTE:    This only mattered while release-changelog-action was in the
+            publish workflow. That action has been removed - Release Drafter
+            owns the release notes now - so this should not recur. Keeping
+            CHANGELOG.md valid is still worth it.
+
+ ..............................................................................
+ #5   Release notes say "No changes"
+ ..............................................................................
+   MEANS:   Release Drafter found no merged PRs to describe.
+   CAUSE:   You committed straight to main instead of going through a PR.
+   FIX:     Always release via a PR from dev to main. Title it with a
+            conventional-commit prefix (feat:, fix:, chore:) so the autolabeler
+            can categorise it.
+
+ ..............................................................................
+ #6   npm says "+ package@version" but `npm view` still shows the old version
+ ..............................................................................
+   MEANS:   Nothing is wrong. npm now accepts and processes asynchronously:
+            "Your package is being processed and may take a few minutes to
+            become available."
+   OBSERVED: ~90 seconds for both 1.1.0 and 1.1.1.
+   CHECK:   Bypass npm's cache and ask the registry directly:
+              curl -s "https://registry.npmjs.org/@nekosuneprojects%2Fvector-sdk" \
+                -H "Cache-Control: no-cache"
+
+ ..............................................................................
+ #7   "package.json is X but the release tag is Y"
+ ..............................................................................
+   MEANS:   Our own guard stopped a wrong-version publish.
+   CAUSE:   You created a release without bumping package.json first.
+   FIX:     Bump package.json to match the tag, merge it, re-run the publish.
+
+ ..............................................................................
+ #8   Merged the PR but NO workflow ran
+ ..............................................................................
+   MEANS:   The merge event did not trigger Actions.
+   CAUSE:   The PR was merged with a token whose events do not raise workflow
+            runs (this happens with `gh pr merge` from the CLI).
+   FIX:     Merge in the GitHub WEB UI. If you already merged from the CLI,
+            publish the draft release by hand (Releases -> the draft -> Publish
+            release), or run the publish workflow manually from the Actions tab.
+
+ ..............................................................................
+ #9   Publish succeeded but there is no provenance line in the log
+ ..............................................................................
+   MEANS:   It published with the TOKEN, not with OIDC.
+   CHECK:   A real trusted publish prints:
+              "Signed provenance statement with source and build information
+               from GitHub Actions"
+              "Provenance statement published to transparency log"
+   CAUSE:   Environment name mismatch, wrong workflow filename in the npm
+            trusted publisher config, missing `id-token: write`, or npm/Node
+            below the required floors.
+   FIX:     Check section 3 above, and section 5 for the version floors.
+
+
+-------------------------------------------------------------------------------
+ 5. HARD REQUIREMENTS FOR TRUSTED PUBLISHING
+-------------------------------------------------------------------------------
+
+  Node    >= 22.14.0     (workflow pins Node 22)
+  npm     >= 11.5.1      (workflow runs `npm install -g npm@latest`)
+  job permissions:
+      id-token: write    <- without this there is no OIDC token at all
+      contents: read
+  job must declare:
+      environment: Node.js Package NPMJS
+
+  Provenance is automatic over OIDC. Do NOT add --provenance; it is not needed.
+
+
+-------------------------------------------------------------------------------
+ 6. DEADLINE YOU CANNOT IGNORE
+-------------------------------------------------------------------------------
+
+  https://gh.io/npm-gat-bypass2fa-deprecation
+
+  Early Aug 2026 (done): 2FA-bypass tokens lost the ability to skip 2FA for
+                         account changes.
+  ~January 2027:         2FA-bypass tokens can NO LONGER PUBLISH directly.
+
+  We are already on trusted publishing, so this does not affect us. Do not
+  drift back to token publishing to "fix" something quickly - it will stop
+  working.
+
+  REMAINING HARDENING (safe to do now that OIDC is proven):
+    npmjs.com -> package -> Settings -> Publishing access
+      switch to: "Require two-factor authentication and disallow bypass 2fa
+                  tokens (recommended)"
+    Trusted publishers keep working under that setting - npm says so on the
+    page itself. Then delete the NPM_TOKEN org secret.
+
+
+-------------------------------------------------------------------------------
+ 7. COMMAND CHEAT SHEET
+-------------------------------------------------------------------------------
+
+  Build and run the test suite
+      npm test
+
+  See exactly what would be published, without publishing
+      npm publish --access public --dry-run
+
+  What is actually on the registry right now (no npm cache in the way)
+      curl -s "https://registry.npmjs.org/@nekosuneprojects%2Fvector-sdk" \
+        -H "Cache-Control: no-cache"
+
+  Who am I logged in as
+      npm whoami
+
+  Log in interactively (opens a browser, satisfies 2FA)
+      npm login
+
+  Emergency manual publish, if CI is broken and it cannot wait
+      cd D:\DEV\NekoSuneVRAPPS\NPMPackageBuilder\vector-js\NPM
+      npm login
+      npm publish --access public
+      (a browser auth URL will be printed - open it and approve)
+
+  Workflow runs / logs
+      gh run list --limit 10
+      gh run view <run-id> --log-failed
+
+  Releases
+      gh release list
+      gh release view vX.Y.Z
+
+  Validate CHANGELOG.md before pushing
+      node -e "const{parser}=require('keep-a-changelog');\
+      parser(require('fs').readFileSync('CHANGELOG.md','utf8'));console.log('ok')"
+
+
+-------------------------------------------------------------------------------
+ 8. THINGS THAT ARE NOT PROBLEMS
+-------------------------------------------------------------------------------
+
+  "LF will be replaced by CRLF"
+      Git line-ending notice on Windows. Harmless.
+
+  "npm warn Unknown user config always-auth"
+      Written into .npmrc by actions/setup-node. Harmless.
+
+  "Node.js 20 is deprecated ... forced to run on Node.js 24"
+      About the ACTIONS themselves (checkout, setup-node), not our Node
+      version. Harmless until GitHub drops it.
+
+  "The ubuntu-latest label will migrate to Ubuntu 26 beginning October 19, 2026"
+      Informational.
+
+  npm 1.0.5 is missing from the registry
+      1.0.5 was never tagged or published. It went straight to 1.1.0.
+      This is recorded in CHANGELOG.md.
+
+===============================================================================
